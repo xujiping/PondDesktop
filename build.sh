@@ -17,8 +17,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>一池</string>
 <key>CFBundleDisplayName</key><string>一池</string>
 <key>CFBundleIdentifier</key><string>studio.yichi.PondDesktop</string>
-<key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>1.1.0</string>
+<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleExecutable</key><string>PondDesktop</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>

@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.1.0"
+let appVersion = "1.2.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -26,6 +26,7 @@ final class Preferences: ObservableObject {
     @Published var lowPower: Bool { didSet { save() } }
     @Published var distance: Double { didSet { save() } }
     @Published var vegetation: Double { didSet { save() } }
+    @Published var harmony: Bool { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -39,6 +40,7 @@ final class Preferences: ObservableObject {
         lowPower = d.bool(forKey: "lowPower")
         distance = d.object(forKey: "viewDistance") == nil ? 1.65 : clamp(d.double(forKey: "viewDistance"), 1, 2.4)
         vegetation = d.object(forKey: "plantDensity") == nil ? 1.15 : clamp(d.double(forKey: "plantDensity"), 0.5, 1.8)
+        harmony = d.object(forKey: "menuBarHarmony") == nil ? true : d.bool(forKey: "menuBarHarmony")
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -51,6 +53,7 @@ final class Preferences: ObservableObject {
         d.set(theme, forKey: "waterTheme"); d.set(enabled, forKey: "desktopEnabled")
         d.set(lowPower, forKey: "lowPower")
         d.set(distance, forKey: "viewDistance"); d.set(vegetation, forKey: "plantDensity")
+        d.set(harmony, forKey: "menuBarHarmony")
         if let data = try? JSONEncoder().encode(designs) { d.set(data, forKey: "fishDesigns") }
         onChange?()
     }
@@ -277,8 +280,9 @@ struct SettingsView: View {
                 }
                 divider
                 Toggle("显示在桌面", isOn: $preferences.enabled).toggleStyle(.switch)
+                Toggle("菜单栏融合 · 纯色壁纸", isOn: $preferences.harmony).toggleStyle(.switch)
                 Toggle("节能模式 · 20 帧", isOn: $preferences.lowPower).toggleStyle(.switch)
-                Text("桌面图标照常使用，设置自动保存。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+                Text("桌面图标照常使用，设置自动保存。菜单栏融合会把壁纸临时换成池水纯色，关闭或退出时恢复原图。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button(action: feed) { Label("投喂", systemImage: "circle.dotted").frame(maxWidth: .infinity) }
                     Button { preferences.paused.toggle() } label: { Label(preferences.paused ? "继续" : "暂停", systemImage: preferences.paused ? "play" : "pause").frame(maxWidth: .infinity) }
@@ -412,6 +416,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if preferences.enabled && desktopWindows.isEmpty { rebuildDesktop() }
         if !preferences.enabled { closeDesktop() }
         for scene in desktopScenes + (previewScene.map { [$0] } ?? []) { scene.configure(); if systemSuspended { scene.isPaused = true } }
+        syncWallpaper()
+    }
+    func syncWallpaper() {
+        if preferences.enabled && preferences.harmony {
+            WallpaperSync.apply(screens: NSScreen.screens, water: Palette(theme: preferences.theme).water, defaults: preferences.defaults)
+        } else {
+            WallpaperSync.restore(defaults: preferences.defaults)
+        }
     }
     func closeDesktop() {
         for window in desktopWindows { (window.contentView as? SKView)?.presentScene(nil); window.close() }
@@ -421,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !rendering, !rebuilding else { return }
         rebuilding = true; defer { rebuilding = false }
         closeDesktop()
-        guard preferences.enabled else { return }
+        guard preferences.enabled else { syncWallpaper(); return }
         for screen in NSScreen.screens {
             let window = DesktopWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
             window.isReleasedWhenClosed = false; window.title = "一池桌面"
@@ -438,6 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if systemSuspended { scene.isPaused = true }
             desktopWindows.append(window); desktopScenes.append(scene)
         }
+        syncWallpaper()
     }
     func suspend(_ value: Bool) {
         systemSuspended = value
@@ -478,7 +491,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showPreview(); return true }
-    func applicationWillTerminate(_ notification: Notification) { editorState?.flush(); closeDesktop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        editorState?.flush(); closeDesktop()
+        if !rendering { WallpaperSync.restore(defaults: preferences.defaults) }
+    }
     func renderPreview(to output: String) {
         NSApp.setActivationPolicy(.accessory)
         let scene = PondScene(size: CGSize(width: 1440, height: 900), preferences: preferences)
@@ -494,6 +510,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func runSelfTests() {
+        rendering = true
+        if let solid = WallpaperSync.solidImageURL(hex: 0x385E50) { precondition(FileManager.default.fileExists(atPath: solid.path), "纯色壁纸文件必须能够生成") }
         let suite = "studio.yichi.tests.\(UUID().uuidString)"
         let isolated = UserDefaults(suiteName: suite)!
         defer { isolated.removePersistentDomain(forName: suite) }

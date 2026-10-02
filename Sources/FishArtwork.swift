@@ -58,7 +58,7 @@ func bitmap(bounds: CGRect, scale: CGFloat = 3, draw: (CGContext) -> Void) -> CG
     return ctx.makeImage()!
 }
 
-struct FishArtPart { let image: CGImage; let bounds: CGRect }
+struct FishArtPart { let texture: SKTexture; let bounds: CGRect }
 enum FishPainter {
     static var cache: [Int: [FishArtPart]] = [:]
     static let bodyBounds = CGRect(x: -34, y: -25, width: 79, height: 50)
@@ -73,8 +73,10 @@ enum FishPainter {
             (CGRect(x: -27, y: -34, width: 32, height: 36), { drawFin($0, design: design, side: -1) }),
             (bodyBounds, { fill($0, fishBodyPath(), 0x08251D, alpha: 0.25) })
         ]
-        let result = specs.map { bounds, drawing in FishArtPart(image: bitmap(bounds: bounds, scale: 4, draw: drawing), bounds: bounds) }
-        if cache.count > 100 { cache.removeAll() }
+        // One shared texture set per artwork key: identical fish reuse GPU memory instead of
+        // uploading a private copy per node.
+        let result = specs.map { bounds, drawing in FishArtPart(texture: SKTexture(cgImage: bitmap(bounds: bounds, scale: 4, draw: drawing)), bounds: bounds) }
+        if cache.count > 24 { cache.removeAll() }
         cache[key] = result; return result
     }
     static func drawBody(_ ctx: CGContext, design: FishDesign) {
@@ -157,7 +159,7 @@ final class FishNode: SKNode {
         tail.zPosition = -1; leftFin.zPosition = -1; rightFin.zPosition = -1
         let nodes = [body, tail, leftFin, rightFin, shadowLayer]
         for (node, part) in zip(nodes, FishPainter.parts(design)) {
-            let sprite = SKSpriteNode(texture: SKTexture(cgImage: part.image), size: part.bounds.size)
+            let sprite = SKSpriteNode(texture: part.texture, size: part.bounds.size)
             sprite.position = CGPoint(x: part.bounds.midX, y: part.bounds.midY); node.addChild(sprite); addChild(node)
         }
         setScale(size / 115 * design.size)

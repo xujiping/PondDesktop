@@ -1,19 +1,82 @@
 import AppKit
 
-// Organic outlines, fine noise and discrete material marks. All colors are solid fills.
+struct PondArtwork {
+    let bed: CGImage
+    let vegetation: [PlantPlacement]
+}
+
+struct VegetationCluster {
+    let center: CGPoint
+    let spread: Double
+    let leafCount: Int
+    let interior: Bool
+}
+
+// The bed is a background plate; plants retain their own full-resolution botanical textures.
 enum PondEnvironment {
-    static func make(size: CGSize, density: Double, palette: Palette) -> (CGImage, CGImage) {
-        let scale = min(1.4, 3000 / max(size.width, size.height))
+    static func clusters(size: CGSize) -> [VegetationCluster] {
+        let unit = plantUnit(size: size)
+        let specs: [(Double, Double, Double, Int, Bool)] = [
+            (0.075, 0.16, 170, 8, false),
+            (0.91, 0.85, 175, 9, false),
+            (0.94, 0.08, 145, 6, false),
+            (0.025, 0.67, 145, 6, false),
+            (0.57, 0.96, 115, 4, false),
+            (0.29, 0.66, 102, 4, true),
+            (0.51, 0.23, 105, 4, true),
+            (0.73, 0.51, 110, 5, true)
+        ]
+        return specs.map { x, y, spread, leaves, interior in
+            VegetationCluster(center: CGPoint(x: size.width * x, y: size.height * y), spread: spread * unit, leafCount: leaves, interior: interior)
+        }
+    }
+
+    static func plantUnit(size: CGSize) -> Double { clamp(min(size.width, size.height) / 1150, 0.7, 1.65) }
+
+    static func placements(size: CGSize, density: Double) -> [PlantPlacement] {
+        let unit = plantUnit(size: size)
+        var result: [PlantPlacement] = []
+        for (index, cluster) in clusters(size: size).enumerated() {
+            // Each colony has an independent seed; changing density preserves its existing plants.
+            var rng = SeededRandom(state: UInt64(395177 + index * 104729))
+            for i in 0..<Int((cluster.interior ? 5 : 9) * density) {
+                let a = rng.range(0, tau), d = rng.range(15, cluster.spread * 1.05)
+                let at = CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.8)
+                result.append(PlantPlacement(kind: i % 3 == 0 ? .pondweed : .reed, variant: i % 4, position: at, scale: rng.range(0.65, 1.02) * unit, rotation: rng.range(-2.8, 2.8), submerged: true, order: CGFloat(i) * 0.01))
+            }
+            // Reset the stream so surface plants are stable when submerged density changes.
+            rng = SeededRandom(state: UInt64(582391 + index * 7919))
+            for i in 0..<max(2, Int(Double(cluster.leafCount) * density)) {
+                let a = rng.range(0, tau), d = sqrt(rng.next()) * cluster.spread
+                let at = CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.78)
+                let scale = rng.range(0.70, 1.08) * unit * (i % 5 == 3 ? 0.72 : 1)
+                result.append(PlantPlacement(kind: (i + index) % 3 == 0 ? .lotus : .lily, variant: (i + index) % 4, position: at, scale: scale, rotation: rng.range(0, tau), submerged: false, order: CGFloat(i) * 0.01))
+            }
+            // Flowers sit in openings above the leaves, instead of being hidden by later leaves.
+            rng = SeededRandom(state: UInt64(85711 + index * 3571))
+            let flowers = cluster.interior ? (index == 6 ? 1 : 0) : (index == 1 ? 2 : 1)
+            for i in 0..<flowers {
+                let at = CGPoint(x: cluster.center.x + rng.range(-0.48, 0.48) * cluster.spread, y: cluster.center.y + rng.range(-0.4, 0.4) * cluster.spread)
+                result.append(PlantPlacement(kind: .flower, variant: (index + i) % 4, position: at, scale: rng.range(0.68, 0.85) * unit, rotation: rng.range(0, tau), submerged: false, order: 2))
+            }
+            for i in 0..<max(1, Int((cluster.interior ? 2 : 4) * density)) {
+                let a = rng.range(0, tau), d = rng.range(cluster.spread * 0.85, cluster.spread * 1.45)
+                let at = CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.8)
+                result.append(PlantPlacement(kind: .duckweed, variant: i % 4, position: at, scale: rng.range(0.75, 1.05) * unit, rotation: rng.range(0, tau), submerged: false, order: 1))
+            }
+        }
+        return result
+    }
+
+    static func make(size: CGSize, density: Double, palette: Palette, rasterScale: CGFloat) -> PondArtwork {
+        let scale = min(rasterScale, 4096 / max(size.width, size.height))
         let bounds = CGRect(origin: .zero, size: size)
-        let anchors = [CGPoint(x: size.width * 0.92, y: size.height * 0.86), CGPoint(x: size.width * 0.065, y: size.height * 0.13), CGPoint(x: size.width * 0.94, y: size.height * 0.035), CGPoint(x: size.width * 0.015, y: size.height * 0.77)]
         let bed = bitmap(bounds: bounds, scale: scale) { ctx in
             ctx.setFillColor(color(palette.water).cgColor); ctx.fill(bounds)
             var rng = SeededRandom(state: 182954)
-            // Irregular silt islands, rather than repeating round background blobs.
             for _ in 0..<210 {
                 let center = CGPoint(x: rng.range(0, size.width), y: rng.range(0, size.height)), r = rng.range(16, 125)
-                let island = organic(center: center, radius: r, random: &rng)
-                fill(ctx, island, rng.next() < 0.5 ? palette.silt : 0x273F30, alpha: rng.range(0.025, 0.08))
+                fill(ctx, organic(center: center, radius: r, random: &rng), rng.next() < 0.5 ? palette.silt : 0x273F30, alpha: rng.range(0.025, 0.065))
             }
             let grains = min(75000, Int(size.width * size.height / 42))
             for _ in 0..<grains {
@@ -22,57 +85,21 @@ enum PondEnvironment {
                 ctx.fill(CGRect(x: rng.range(0, size.width), y: rng.range(0, size.height), width: r, height: r * 0.7))
             }
             for _ in 0..<480 {
-                let x = rng.range(0, size.width), y = rng.range(0, size.height), r = rng.range(1.2, 7)
-                pebble(ctx, at: CGPoint(x: x, y: y), radius: r, random: &rng, alpha: 0.32)
+                let center = CGPoint(x: rng.range(0, size.width), y: rng.range(0, size.height))
+                pebble(ctx, at: center, radius: rng.range(1.2, 7), random: &rng, alpha: 0.32)
             }
-            for (cluster, anchor) in anchors.enumerated() {
-                for _ in 0..<Int(55 * density) {
-                    let angle = rng.range(0, tau), distance = rng.range(0, 175)
-                    pebble(ctx, at: CGPoint(x: anchor.x + cos(angle) * distance, y: anchor.y + sin(angle) * distance * 0.72), radius: rng.range(6, 22), random: &rng, alpha: 0.52)
-                }
-                for i in 0..<Int(19 * density) {
-                    let base = CGPoint(x: anchor.x + rng.range(-110, 95), y: anchor.y + rng.range(-90, 60))
-                    ctx.saveGState(); ctx.translateBy(x: base.x, y: base.y); ctx.rotate(by: rng.range(-1.8, 1.8))
-                    if i % 3 == 0 { elodea(ctx, length: rng.range(65, 150), random: &rng) }
-                    else { ribbonGrass(ctx, length: rng.range(70, 185), random: &rng) }
-                    ctx.restoreGState()
-                }
-                if cluster < 3 {
-                    ctx.saveGState(); ctx.translateBy(x: anchor.x - 65, y: anchor.y - 60); ctx.rotate(by: rng.range(-1, 1))
-                    rhizome(ctx, random: &rng); ctx.restoreGState()
-                }
-                // Thin submerged lotus stalks radiate from their rhizome.
-                for _ in 0..<Int(8 * density) {
-                    let end = CGPoint(x: anchor.x + rng.range(-165, 165), y: anchor.y + rng.range(-135, 115))
-                    line(ctx, path { p in p.move(to: CGPoint(x: anchor.x - 35, y: anchor.y - 45)); p.addQuadCurve(to: end, control: CGPoint(x: anchor.x + 60, y: end.y - 20)) }, 0x3B5933, width: 2.2, alpha: 0.45)
+            for cluster in clusters(size: size) {
+                for _ in 0..<Int((cluster.interior ? 13 : 27) * density) {
+                    let a = rng.range(0, tau), d = rng.range(0, cluster.spread * 1.1)
+                    pebble(ctx, at: CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.72), radius: rng.range(4, 14) * plantUnit(size: size), random: &rng, alpha: 0.44)
                 }
             }
-            // A few broken sunlit water contours, with uniform stroke color.
             for _ in 0..<26 {
-                let x = rng.range(0, size.width), y = rng.range(0, size.height), width = rng.range(55, 180)
-                line(ctx, path { p in p.move(to: CGPoint(x: x, y: y)); p.addCurve(to: CGPoint(x: x + width, y: y + 18), control1: CGPoint(x: x + width * 0.3, y: y + 35), control2: CGPoint(x: x + width * 0.55, y: y - 35)) }, 0xD3D8AB, width: 0.8, alpha: 0.07)
+                let x = rng.range(0, size.width), y = rng.range(0, size.height), w = rng.range(55, 180)
+                line(ctx, path { p in p.move(to: CGPoint(x: x, y: y)); p.addCurve(to: CGPoint(x: x + w, y: y + 18), control1: CGPoint(x: x + w * 0.3, y: y + 35), control2: CGPoint(x: x + w * 0.55, y: y - 35)) }, 0xD3D8AB, width: 0.8, alpha: 0.07)
             }
         }
-        let plants = bitmap(bounds: bounds, scale: scale) { ctx in
-            var rng = SeededRandom(state: 395177)
-            for (cluster, anchor) in anchors.enumerated() {
-                let count = Int((cluster < 2 ? 12 : 7) * density)
-                for i in 0..<count {
-                    let angle = rng.range(0, tau), d = rng.range(20, cluster < 2 ? 165 : 135)
-                    let position = CGPoint(x: anchor.x + cos(angle) * d, y: anchor.y + sin(angle) * d * 0.74)
-                    ctx.saveGState(); ctx.translateBy(x: position.x, y: position.y); ctx.rotate(by: rng.range(0, tau))
-                    lotusLeaf(ctx, radius: rng.range(25, 63), palette: palette, random: &rng, young: i % 5 == 0)
-                    if i == 2 || (cluster < 2 && i == 7) { ctx.translateBy(x: 23, y: 18); lotusFlower(ctx, radius: rng.range(20, 27), random: &rng) }
-                    if i == 5 { ctx.translateBy(x: 26, y: 5); seedPod(ctx) }
-                    ctx.restoreGState()
-                }
-                for _ in 0..<Int(36 * density) {
-                    let x = anchor.x + rng.range(-210, 200), y = anchor.y + rng.range(-170, 155), r = rng.range(1.4, 3.4)
-                    ctx.setFillColor(color(0x87A555, 0.75).cgColor); ctx.fillEllipse(in: CGRect(x: x, y: y, width: r * 2, height: r * 1.3))
-                }
-            }
-        }
-        return (bed, plants)
+        return PondArtwork(bed: bed, vegetation: placements(size: size, density: density))
     }
     static func organic(center: CGPoint, radius: Double, random: inout SeededRandom, count: Int = 18) -> CGPath {
         var points: [CGPoint] = []
@@ -90,83 +117,5 @@ enum PondEnvironment {
         let shades: [UInt32] = [0x849181, 0x6D8171, 0xA5A28A, 0x5E7469, 0x8C8B72]
         fill(ctx, p, shades[Int(random.range(0, 4.99))], alpha: alpha)
         line(ctx, path { p in p.move(to: CGPoint(x: center.x - radius * 0.5, y: center.y + radius * 0.36)); p.addQuadCurve(to: CGPoint(x: center.x + radius * 0.45, y: center.y + radius * 0.36), control: CGPoint(x: center.x, y: center.y + radius * 0.68)) }, 0xD8CFAB, width: max(0.45, radius / 12), alpha: alpha * 0.4)
-    }
-    static func ribbonGrass(_ ctx: CGContext, length: Double, random: inout SeededRandom) {
-        for i in 0..<5 {
-            let h = length * random.range(0.6, 1.2), bend = random.range(-55, 55), width = random.range(3, 6)
-            let p = path { p in p.move(to: .zero); p.addCurve(to: CGPoint(x: bend, y: h), control1: CGPoint(x: -20, y: h * 0.3), control2: CGPoint(x: 35, y: h * 0.75)); p.addCurve(to: CGPoint(x: width, y: 0), control1: CGPoint(x: 25, y: h * 0.75), control2: CGPoint(x: -12, y: h * 0.3)); p.closeSubpath() }
-            fill(ctx, p, i % 2 == 0 ? 0x547C49 : 0x365C3B, alpha: 0.53)
-            line(ctx, path { p in p.move(to: CGPoint(x: width * 0.5, y: 0)); p.addCurve(to: CGPoint(x: bend, y: h), control1: CGPoint(x: -16, y: h * 0.3), control2: CGPoint(x: 30, y: h * 0.75)) }, 0x91AB68, width: 0.6, alpha: 0.35)
-        }
-    }
-    static func elodea(_ ctx: CGContext, length: Double, random: inout SeededRandom) {
-        let bend = random.range(-35, 35)
-        line(ctx, path { p in p.move(to: .zero); p.addQuadCurve(to: CGPoint(x: bend, y: length), control: CGPoint(x: -20, y: length * 0.5)) }, 0x4E743D, width: 1.5, alpha: 0.67)
-        for i in 1..<12 {
-            let y = Double(i) / 12 * length, x = bend * pow(Double(i) / 12, 2) - 8 * sin(Double(i) / 12 * .pi)
-            for side in [-1.0, 1.0] {
-                let tip = CGPoint(x: x + side * random.range(9, 18), y: y + random.range(8, 17))
-                fill(ctx, path { p in p.move(to: CGPoint(x: x, y: y)); p.addQuadCurve(to: tip, control: CGPoint(x: x + side * 14, y: y)); p.addQuadCurve(to: CGPoint(x: x, y: y), control: CGPoint(x: x + side * 2, y: y + 13)); p.closeSubpath() }, 0x5D824B, alpha: 0.55)
-            }
-        }
-    }
-    static func rhizome(_ ctx: CGContext, random: inout SeededRandom) {
-        for i in 0..<3 {
-            let x = Double(i) * 48, y = sin(Double(i) * 1.7) * 10
-            let p = path { p in p.move(to: CGPoint(x: x, y: y)); p.addCurve(to: CGPoint(x: x + 50, y: y + 2), control1: CGPoint(x: x + 8, y: y + 18), control2: CGPoint(x: x + 43, y: y + 17)); p.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: x + 47, y: y - 16), control2: CGPoint(x: x + 6, y: y - 15)); p.closeSubpath() }
-            fill(ctx, p, 0xA49A6B, alpha: 0.47); line(ctx, p, 0x5D603C, width: 0.8, alpha: 0.45)
-            for j in 1...3 { let sx = x + Double(j) * 12; line(ctx, path { p in p.move(to: CGPoint(x: sx, y: y - 8)); p.addQuadCurve(to: CGPoint(x: sx, y: y + 9), control: CGPoint(x: sx - 3, y: y)) }, 0x646C43, width: 0.6, alpha: 0.48) }
-            for j in 0..<4 { let sx = x + Double(j) * 7; line(ctx, path { p in p.move(to: CGPoint(x: sx, y: y - 10)); p.addQuadCurve(to: CGPoint(x: sx - random.range(8, 22), y: y - random.range(17, 35)), control: CGPoint(x: sx + 4, y: y - 21)) }, 0xA79C70, width: 0.65, alpha: 0.38) }
-        }
-    }
-    static func lotusLeaf(_ ctx: CGContext, radius r: Double, palette: Palette, random: inout SeededRandom, young: Bool) {
-        let outline = organic(center: .zero, radius: r, random: &random, count: 30)
-        ctx.saveGState(); ctx.translateBy(x: 4, y: -7); fill(ctx, outline, 0x102F23, alpha: 0.3); ctx.restoreGState()
-        fill(ctx, outline, young ? 0x7D9552 : palette.leaf)
-        line(ctx, outline, 0x344D2D, width: 0.9, alpha: 0.8)
-        ctx.saveGState(); ctx.addPath(outline); ctx.clip()
-        for sector in 0..<12 {
-            let a = Double(sector) / 12 * tau
-            if sector % 3 == 0 { fill(ctx, path { p in p.move(to: .zero); p.addLine(to: CGPoint(x: cos(a) * r, y: sin(a) * r)); p.addLine(to: CGPoint(x: cos(a + 0.28) * r, y: sin(a + 0.28) * r)); p.closeSubpath() }, 0x273F24, alpha: 0.08) }
-            let end = CGPoint(x: cos(a) * r * 0.94, y: sin(a) * r * 0.75)
-            line(ctx, path { p in p.move(to: .zero); p.addQuadCurve(to: end, control: CGPoint(x: cos(a + 0.11) * r * 0.53, y: sin(a + 0.11) * r * 0.42)) }, 0xAFBD77, width: 0.65, alpha: 0.6)
-            for branch in 1...4 {
-                let t = Double(branch) / 5, center = CGPoint(x: end.x * t, y: end.y * t)
-                for sign in [-1.0, 1.0] {
-                    let tip = CGPoint(x: center.x + cos(a + sign * 0.65) * r * 0.2, y: center.y + sin(a + sign * 0.65) * r * 0.16)
-                    line(ctx, path { p in p.move(to: center); p.addLine(to: tip) }, 0xABB979, width: 0.3, alpha: 0.42)
-                }
-            }
-        }
-        for _ in 0..<240 {
-            let x = random.range(-r, r), y = random.range(-r, r), dot = random.range(0.2, 0.7)
-            ctx.setFillColor(color(random.next() < 0.5 ? 0xD7D9A3 : 0x273F26, random.range(0.08, 0.24)).cgColor); ctx.fillEllipse(in: CGRect(x: x, y: y, width: dot, height: dot))
-        }
-        ctx.restoreGState()
-        ctx.setFillColor(color(0xB4C085, 0.5).cgColor); ctx.fillEllipse(in: CGRect(x: -2, y: -2, width: 4, height: 4))
-        if random.next() < 0.3 {
-            let x = r * 0.33, y = r * 0.2
-            ctx.setFillColor(color(0xD2DED0, 0.56).cgColor); ctx.fillEllipse(in: CGRect(x: x, y: y, width: 3.4, height: 2.4))
-        }
-    }
-    static func lotusFlower(_ ctx: CGContext, radius r: Double, random: inout SeededRandom) {
-        ctx.setFillColor(color(0x233828, 0.25).cgColor); ctx.fillEllipse(in: CGRect(x: -r + 5, y: -r - 5, width: r * 2, height: r * 2))
-        for ring in 0..<3 {
-            let count = ring == 2 ? 7 : 11, length = r * (1 - Double(ring) * 0.22)
-            for i in 0..<count {
-                ctx.saveGState(); ctx.rotate(by: Double(i) / Double(count) * tau + Double(ring) * 0.26)
-                let petal = path { p in p.move(to: CGPoint(x: 0, y: -2)); p.addCurve(to: CGPoint(x: 0, y: length), control1: CGPoint(x: -length * 0.55, y: length * 0.28), control2: CGPoint(x: -length * 0.16, y: length * 0.78)); p.addCurve(to: CGPoint(x: 0, y: -2), control1: CGPoint(x: length * 0.16, y: length * 0.78), control2: CGPoint(x: length * 0.55, y: length * 0.28)); p.closeSubpath() }
-                fill(ctx, petal, ring == 0 ? 0xC88C92 : ring == 1 ? 0xDFAAB0 : 0xF0D6CE)
-                line(ctx, petal, 0xAC777E, width: 0.5, alpha: 0.65)
-                line(ctx, path { p in p.move(to: .zero); p.addLine(to: CGPoint(x: 0, y: length * 0.85)) }, 0xFFF0DE, width: 0.4, alpha: 0.6)
-                ctx.restoreGState()
-            }
-        }
-        ctx.setFillColor(color(0xD5AE51).cgColor); ctx.fillEllipse(in: CGRect(x: -4, y: -4, width: 8, height: 8))
-        for i in 0..<12 { let a = Double(i) / 12 * tau; ctx.setFillColor(color(0xEACA6E).cgColor); ctx.fillEllipse(in: CGRect(x: cos(a) * 5 - 0.7, y: sin(a) * 5 - 0.7, width: 1.4, height: 1.4)) }
-    }
-    static func seedPod(_ ctx: CGContext) {
-        ctx.setFillColor(color(0x8B9A55).cgColor); ctx.fillEllipse(in: CGRect(x: -10, y: -8, width: 20, height: 16))
-        for row in -1...1 { for column in -1...1 { ctx.setFillColor(color(0x4B5D36).cgColor); ctx.fillEllipse(in: CGRect(x: Double(column) * 5 - 1.2, y: Double(row) * 4 - 1.2, width: 2.4, height: 2.4)) } }
     }
 }

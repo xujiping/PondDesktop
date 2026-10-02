@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.2.0"
+let appVersion = "1.3.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -27,6 +27,7 @@ final class Preferences: ObservableObject {
     @Published var distance: Double { didSet { save() } }
     @Published var vegetation: Double { didSet { save() } }
     @Published var harmony: Bool { didSet { save() } }
+    @Published var interact: Bool { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -41,6 +42,7 @@ final class Preferences: ObservableObject {
         distance = d.object(forKey: "viewDistance") == nil ? 1.65 : clamp(d.double(forKey: "viewDistance"), 1, 2.4)
         vegetation = d.object(forKey: "plantDensity") == nil ? 1.15 : clamp(d.double(forKey: "plantDensity"), 0.5, 1.8)
         harmony = d.object(forKey: "menuBarHarmony") == nil ? true : d.bool(forKey: "menuBarHarmony")
+        interact = d.object(forKey: "mouseInteraction") == nil ? true : d.bool(forKey: "mouseInteraction")
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -53,7 +55,7 @@ final class Preferences: ObservableObject {
         d.set(theme, forKey: "waterTheme"); d.set(enabled, forKey: "desktopEnabled")
         d.set(lowPower, forKey: "lowPower")
         d.set(distance, forKey: "viewDistance"); d.set(vegetation, forKey: "plantDensity")
-        d.set(harmony, forKey: "menuBarHarmony")
+        d.set(harmony, forKey: "menuBarHarmony"); d.set(interact, forKey: "mouseInteraction")
         if let data = try? JSONEncoder().encode(designs) { d.set(data, forKey: "fishDesigns") }
         onChange?()
     }
@@ -62,7 +64,8 @@ final class Preferences: ObservableObject {
 struct Swimmer {
     var x: Double, y: Double, angle: Double, cruise: Double, phase: Double, length: Double
     var turn: Double = 0
-    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, target: CGPoint?, neighbours: [CGPoint]) {
+    var startledUntil = 0.0, startledFrom = CGPoint.zero
+    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, target: CGPoint?, neighbours: [CGPoint], cursor: CGPoint? = nil, curious: Bool = false, cursorRadius: Double = 0) {
         var desired = angle + sin(time * 0.37 + phase) * 0.45 + sin(time * 0.17 + phase * 3) * 0.22
         let margin = min(150.0, min(width, height) * 0.2)
         var fx = cos(desired), fy = sin(desired)
@@ -74,15 +77,25 @@ struct Swimmer {
             let dx = x - p.x, dy = y - p.y, d2 = dx * dx + dy * dy
             if d2 > 1 && d2 < 85 * 85 { let d = sqrt(d2); fx += dx / d * (1 - d / 85) * 0.7; fy += dy / d * (1 - d / 85) * 0.7 }
         }
+        if startledUntil > time {
+            let dx = x - startledFrom.x, dy = y - startledFrom.y, d = max(1, hypot(dx, dy))
+            fx += dx / d * 3.2; fy += dy / d * 3.2
+        } else if curious, let c = cursor {
+            // 光标像一根手指：游近了就停在旁边端详，不再贴上去。
+            let dx = c.x - x, dy = c.y - y, distance = hypot(dx, dy)
+            if distance > 70 && distance < cursorRadius { fx += dx / distance * 0.8; fy += dy / distance * 0.8 }
+        }
         if let t = target {
             let dx = t.x - x, dy = t.y - y, distance = hypot(dx, dy)
             if distance > 32 { fx += dx / distance * 2.4; fy += dy / distance * 2.4 }
         }
         desired = atan2(fy, fx)
         let delta = atan2(sin(desired - angle), cos(desired - angle))
-        turn += (clamp(delta * 1.9, -1.05, 1.05) - turn) * min(1, dt * 3)
+        // 受惊时急转急游，平时转向平缓。
+        let panicking = startledUntil > time
+        turn += (clamp(delta * (panicking ? 3.4 : 1.9), panicking ? -2.2 : -1.05, panicking ? 2.2 : 1.05) - turn) * min(1, dt * (panicking ? 6 : 3))
         angle += turn * dt
-        let velocity = cruise * speed * (1 + 0.12 * sin(time * 1.1 + phase))
+        let velocity = cruise * speed * (panicking ? 2.3 : 1) * (1 + 0.12 * sin(time * 1.1 + phase))
         x = clamp(x + cos(angle) * velocity * dt, 28, max(28, width - 28))
         y = clamp(y + sin(angle) * velocity * dt, 28, max(28, height - 28))
     }
@@ -111,11 +124,16 @@ final class PondScene: SKScene {
     let floor = SKNode(), inhabitants = SKNode(), surface = SKNode(), plants = SKNode(), foodLayer = SKNode()
     let pondCamera = SKCameraNode()
     var worldSize: CGSize { CGSize(width: size.width * preferences.distance, height: size.height * preferences.distance) }
-    var configuredDensity = -1.0
-    var lastTime: TimeInterval = 0, simulationTime: Double = 0, rippleClock: Double = 0
+    var configuredSize = CGSize.zero
+    var floorStamp = ""
+    var bedSprite: SKSpriteNode?
+    var plantMotions: [PlantMotion] = []
+    let water = PondWater()
+    var lastTime: TimeInterval = 0, simulationTime: Double = 0
+    var wakeClock = 0.0, wakeIndex = 0
     var foodTarget: CGPoint?, foodExpiry: Double = 0
-    var configuredTheme = "", configuredSize = CGSize.zero
     var allowsFeeding = false
+    var cursor: CursorProbe?
     var rng = SeededRandom()
     init(size: CGSize, preferences: Preferences) {
         self.preferences = preferences
@@ -127,18 +145,31 @@ final class PondScene: SKScene {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure() {
+        // The desktop has its own cached backing image; a recovering SpriteKit
+        // drawable must never cover it with a solid green clear colour.
+        backgroundColor = view?.allowsTransparency == true ? .clear : color(Palette(theme: preferences.theme).water)
         let world = worldSize
         guard world.width > 56, world.height > 56 else { return }
+        let rasterScale = (view?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) / preferences.distance
         if configuredSize != world {
             if configuredSize.width > 0 && configuredSize.height > 0 {
                 for i in swimmers.indices { swimmers[i].x *= world.width / configuredSize.width; swimmers[i].y *= world.height / configuredSize.height }
                 if let target = foodTarget { foodTarget = CGPoint(x: target.x * world.width / configuredSize.width, y: target.y * world.height / configuredSize.height) }
             }
             pondCamera.position = CGPoint(x: world.width / 2, y: world.height / 2); pondCamera.setScale(preferences.distance)
+            configuredSize = world
         }
-        if configuredTheme != preferences.theme || configuredSize != world || configuredDensity != preferences.vegetation {
-            configuredTheme = preferences.theme; configuredSize = world; configuredDensity = preferences.vegetation; buildFloor()
+        // Slider drags re-bake only when a bucket (density 0.1, distance 0.125) changes; the bed
+        // plate itself is proportional, so between buckets it is simply stretched for free.
+        let stamp = "\(preferences.theme)|\(Int((preferences.vegetation * 10).rounded()))|\(Int(size.width))x\(Int(size.height))|\(Int((preferences.distance * 8).rounded()))|\(String(format: "%.2f", rasterScale))"
+        if stamp != floorStamp { floorStamp = stamp; buildFloor(rasterScale: rasterScale) }
+        bedSprite?.size = worldSize
+        bedSprite?.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2)
+        if let bed = bedSprite {
+            water.configure(size: worldSize, distance: preferences.distance, bed: bed, floor: floor, surface: surface,
+                            reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         }
+        animatePlants()
         let count = Int(preferences.count.rounded())
         while swimmers.count > count { swimmers.removeLast(); fishNodes.removeLast().removeFromParent() }
         while swimmers.count < count {
@@ -165,15 +196,44 @@ final class PondScene: SKScene {
         guard size.width > 0, size.height > 0 else { return }
         configure()
     }
-    func buildFloor() {
-        floor.removeAllChildren(); plants.removeAllChildren()
+    func buildFloor(rasterScale: CGFloat) {
+        floor.removeAllChildren(); plants.removeAllChildren(); plantMotions.removeAll()
         if plants.parent == nil { surface.addChild(plants) }
         let palette = Palette(theme: preferences.theme)
-        backgroundColor = color(palette.water)
-        let artwork = PondEnvironment.make(size: worldSize, density: preferences.vegetation, palette: palette)
-        for (layer, image) in [(floor, artwork.0), (plants, artwork.1)] {
-            let sprite = SKSpriteNode(texture: SKTexture(cgImage: image), size: worldSize)
-            sprite.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2); layer.addChild(sprite)
+        let artwork = PondEnvironment.make(size: worldSize, density: preferences.vegetation, palette: palette, rasterScale: rasterScale)
+        let bed = SKSpriteNode(texture: SKTexture(cgImage: artwork.bed), size: worldSize)
+        bed.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2); bed.zPosition = -1; floor.addChild(bed)
+        bedSprite = bed
+        for placement in artwork.vegetation {
+            let sprite = PlantPainter.sprite(placement)
+            if placement.submerged {
+                sprite.alpha = 0.64; sprite.color = color(palette.water); sprite.colorBlendFactor = 0.18
+            }
+            (placement.submerged ? floor : plants).addChild(sprite)
+            plantMotions.append(PlantMotion(sprite: sprite, placement: placement))
+        }
+    }
+    func animatePlants() {
+        for motion in plantMotions {
+            motion.animate(time: simulationTime, distance: preferences.distance, reducedMotion: water.reducedMotion,
+                           ripple: water.displacement(at: motion.placement.position, time: simulationTime))
+        }
+    }
+    // 视图/屏幕坐标 → 池塘世界坐标（相机拉近拉远时同样成立）。
+    func worldPoint(fromView v: CGPoint) -> CGPoint {
+        CGPoint(x: (v.x - size.width / 2) * pondCamera.xScale + pondCamera.position.x,
+                y: (v.y - size.height / 2) * pondCamera.yScale + pondCamera.position.y)
+    }
+    func worldPoint(fromScreen p: NSPoint) -> CGPoint? {
+        guard let window = view?.window else { return nil }
+        let local = window.convertFromScreen(NSRect(origin: p, size: .zero)).origin
+        return worldPoint(fromView: local)
+    }
+    // 急挥的光标惊散附近鱼群：一小段时间内全力逃离该点。
+    func startle(near point: CGPoint) {
+        let radius = min(worldSize.width, worldSize.height) * 0.28
+        for i in swimmers.indices where hypot(swimmers[i].x - point.x, swimmers[i].y - point.y) < radius {
+            swimmers[i].startledUntil = simulationTime + 1.1; swimmers[i].startledFrom = point
         }
     }
     func feed(at point: CGPoint? = nil) {
@@ -189,26 +249,45 @@ final class PondScene: SKScene {
         addRipple(at: center)
     }
     func addRipple(at point: CGPoint) {
-        let n = ellipse(CGRect(x: -12, y: -12, width: 24, height: 24), .clear, stroke: color(0xD0E1C5, 0.18), width: 0.75)
-        n.position = point; surface.addChild(n)
-        n.run(.sequence([.group([.scale(to: 5, duration: 4), .fadeOut(withDuration: 4)]), .removeFromParent()]))
+        water.addRipple(at: point, time: simulationTime)
     }
-    override func mouseDown(with event: NSEvent) { if allowsFeeding { feed(at: event.location(in: self)) } }
+    override func mouseDown(with event: NSEvent) {
+        guard allowsFeeding, let view else { return }
+        // location(in: SKNode) 已应用相机；从视图取点，再换算一次世界坐标。
+        feed(at: worldPoint(fromView: view.convert(event.locationInWindow, from: nil)))
+    }
     override func update(_ currentTime: TimeInterval) {
         guard !preferences.paused, worldSize.width > 56, worldSize.height > 56 else { lastTime = 0; return }
         let dt = lastTime == 0 ? 0 : min(0.05, currentTime - lastTime)
-        lastTime = currentTime; simulationTime += dt; rippleClock += dt
+        lastTime = currentTime; simulationTime += dt
+        water.update(time: simulationTime)
+        animatePlants()
         if simulationTime > foodExpiry { foodTarget = nil }
+        // 光标互动：6 秒内的光标还算“在场”；静止或缓动的光标让附近金鱼好奇，急挥则已被上层惊散。
+        var cursorPoint: CGPoint? = nil, curious = false
+        if preferences.interact, let probe = cursor {
+            let age = -probe.updated.timeIntervalSinceNow
+            if age < 6 {
+                cursorPoint = probe.world
+                curious = probe.speed < CursorStream.calmSpeed || age > 0.3
+            }
+        }
+        let cursorRadius = min(worldSize.width, worldSize.height) * 0.35
         let positions = swimmers.map { CGPoint(x: $0.x, y: $0.y) }
         for i in swimmers.indices {
             var near: [CGPoint] = []
             for j in positions.indices where j != i { near.append(positions[j]) }
-            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, target: foodTarget, neighbours: near)
+            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, target: foodTarget, neighbours: near, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
         }
-        if rippleClock > 2.7 {
-            rippleClock = 0
-            addRipple(at: CGPoint(x: rng.range(40, max(41, worldSize.width - 40)), y: rng.range(40, max(41, worldSize.height - 40))))
+        // 浅水中的鱼偶尔带动水面，保持稀疏尾波，避免每条鱼都画出一圈圈靶心。
+        wakeClock += dt
+        if !water.reducedMotion, wakeClock > 2.4, !swimmers.isEmpty {
+            wakeClock = 0; wakeIndex = (wakeIndex + 7) % swimmers.count
+            let fish = swimmers[wakeIndex]
+            let point = CGPoint(x: fish.x - cos(fish.angle) * fish.length * 0.4,
+                                y: fish.y - sin(fish.angle) * fish.length * 0.4)
+            water.addRipple(at: point, time: simulationTime, strength: 0.16, radius: 72)
         }
     }
 }
@@ -280,16 +359,17 @@ struct SettingsView: View {
                 }
                 divider
                 Toggle("显示在桌面", isOn: $preferences.enabled).toggleStyle(.switch)
-                Toggle("菜单栏融合 · 纯色壁纸", isOn: $preferences.harmony).toggleStyle(.switch)
+                Toggle("鼠标互动 · 涟漪与投喂", isOn: $preferences.interact).toggleStyle(.switch)
+                Toggle("菜单栏融合 · 池塘壁纸", isOn: $preferences.harmony).toggleStyle(.switch)
                 Toggle("节能模式 · 20 帧", isOn: $preferences.lowPower).toggleStyle(.switch)
-                Text("桌面图标照常使用，设置自动保存。菜单栏融合会把壁纸临时换成池水纯色，关闭或退出时恢复原图。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+                Text("桌面图标照常使用，设置自动保存。鼠标缓缓拂过水面泛起涟漪，附近的金鱼会好奇靠近；在桌面空白处轻点即可投喂，快速挥动会惊散鱼群。菜单栏融合会临时使用池塘壁纸，切回桌面时直接显示池塘，关闭或退出时恢复原图。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button(action: feed) { Label("投喂", systemImage: "circle.dotted").frame(maxWidth: .infinity) }
                     Button { preferences.paused.toggle() } label: { Label(preferences.paused ? "继续" : "暂停", systemImage: preferences.paused ? "play" : "pause").frame(maxWidth: .infinity) }
                 }.buttonStyle(.bordered).controlSize(.large)
                 HStack {
                     if compact { Button("打开池塘预览", action: preview).buttonStyle(.plain) }
-                    else { Text("点击水面投喂。").foregroundStyle(muted) }
+                    else { Text("点击水面或桌面空白处投喂。").foregroundStyle(muted) }
                     Spacer(); Button("退出", action: quit).buttonStyle(.plain).foregroundStyle(muted)
                 }.font(.system(size: 11))
             }.font(.system(size: 12)).padding(24)
@@ -355,6 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var systemSuspended = false
     var settingsWork: DispatchWorkItem?
     var rendering = false
+    let stream = CursorStream()
+    var cursorMonitors: [Any] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--self-test") { runSelfTests(); return }
         if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > index + 1 {
@@ -363,9 +445,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         installMainMenu()
+        installCursorInteraction()
         preferences.onChange = { [weak self] in self?.scheduleSettings() }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.rebuildDesktop() })
         let nc = NSWorkspace.shared.notificationCenter
+        observers.append(nc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshDesktop()
+        })
+        observers.append(nc.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applySettings()
+        })
         for event in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             observers.append(nc.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.suspend(true) })
         }
@@ -400,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.target = self; button.action = #selector(togglePopover(_:)); button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         popover.behavior = .transient
-        popover.contentSize = CGSize(width: 340, height: 730)
+        popover.contentSize = CGSize(width: 340, height: 782)
         popover.contentViewController = NSHostingController(rootView: SettingsView(preferences: preferences, compact: true, feed: { [weak self] in self?.feedAll() }, preview: { [weak self] in self?.popover.close(); self?.showPreview() }, quit: { NSApp.terminate(nil) }, edit: { [weak self] in self?.popover.close(); self?.showEditor() }))
     }
     @objc func togglePopover(_ sender: Any?) {
@@ -416,17 +505,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if preferences.enabled && desktopWindows.isEmpty { rebuildDesktop() }
         if !preferences.enabled { closeDesktop() }
         for scene in desktopScenes + (previewScene.map { [$0] } ?? []) { scene.configure(); if systemSuspended { scene.isPaused = true } }
+        for window in desktopWindows { (window.contentView as? DesktopPondView)?.updateBackdrop() }
         syncWallpaper()
     }
-    func syncWallpaper() {
+    func syncWallpaper(onlyManaged: Bool = false) {
         if preferences.enabled && preferences.harmony {
-            WallpaperSync.apply(screens: NSScreen.screens, water: Palette(theme: preferences.theme).water, defaults: preferences.defaults)
+            for window in desktopWindows {
+                guard let screen = window.screen, let view = window.contentView as? DesktopPondView,
+                      let frame = view.backdrop else { continue }
+                WallpaperSync.apply(screen: screen, frame: frame, stamp: view.backdropStamp, defaults: preferences.defaults, onlyManaged: onlyManaged)
+            }
         } else {
             WallpaperSync.restore(defaults: preferences.defaults)
         }
     }
     func closeDesktop() {
-        for window in desktopWindows { (window.contentView as? SKView)?.presentScene(nil); window.close() }
+        for window in desktopWindows { (window.contentView as? DesktopPondView)?.renderer.presentScene(nil); window.close() }
         desktopWindows.removeAll(); desktopScenes.removeAll()
     }
     func rebuildDesktop() {
@@ -438,19 +532,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let window = DesktopWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
             window.isReleasedWhenClosed = false; window.title = "一池桌面"
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+            window.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             window.ignoresMouseEvents = true; window.hasShadow = false
-            window.isOpaque = true; window.backgroundColor = color(Palette(theme: preferences.theme).water)
-            let view = SKView(frame: CGRect(origin: .zero, size: screen.frame.size))
-            view.preferredFramesPerSecond = preferences.lowPower ? 20 : 30
-            view.ignoresSiblingOrder = true
+            window.isOpaque = true; window.backgroundColor = .clear; window.animationBehavior = .none
+            let view = DesktopPondView(frame: CGRect(origin: .zero, size: screen.frame.size))
+            view.renderer.preferredFramesPerSecond = preferences.lowPower ? 20 : 30
             let scene = PondScene(size: screen.frame.size, preferences: preferences)
-            view.presentScene(scene); window.contentView = view
+            window.contentView = view; view.renderer.presentScene(scene)
+            view.updateBackdrop()
             window.setFrame(screen.frame, display: true); window.orderFrontRegardless()
             if systemSuspended { scene.isPaused = true }
             desktopWindows.append(window); desktopScenes.append(scene)
         }
         syncWallpaper()
+    }
+    func refreshDesktop() {
+        syncWallpaper(onlyManaged: true)
+        for (window, scene) in zip(desktopWindows, desktopScenes) where window.isOnActiveSpace {
+            scene.lastTime = 0
+            scene.isPaused = systemSuspended || preferences.paused
+            window.contentView?.needsDisplay = true
+            window.displayIfNeeded()
+        }
     }
     func suspend(_ value: Bool) {
         systemSuspended = value
@@ -511,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func runSelfTests() {
         rendering = true
-        if let solid = WallpaperSync.solidImageURL(hex: 0x385E50) { precondition(FileManager.default.fileExists(atPath: solid.path), "纯色壁纸文件必须能够生成") }
+        runWallpaperChecks()
         let suite = "studio.yichi.tests.\(UUID().uuidString)"
         let isolated = UserDefaults(suiteName: suite)!
         defer { isolated.removePersistentDomain(forName: suite) }

@@ -1,37 +1,59 @@
 import AppKit
+import SpriteKit
 
-// The menu bar tint samples the system wallpaper itself, never overlay windows, so the only
-// way to blend it with the pond is to temporarily install a solid wallpaper in the water
-// colour and restore each screen's original image and options afterwards.
+// Space transitions show the system wallpaper before desktop-level windows. Keep a
+// camera-matched pond frame underneath the animation, also used for menu bar tinting.
 enum WallpaperSync {
+    static var snapshots: [String: (stamp: String, url: URL)] = [:]
     static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("一池", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }
-    static func solidImageURL(hex: UInt32) -> URL? {
-        let url = directory.appendingPathComponent(String(format: "water-%06X.png", hex))
-        guard !FileManager.default.fileExists(atPath: url.path) else { return url }
-        let image = bitmap(bounds: CGRect(x: 0, y: 0, width: 8, height: 8), scale: 8) { ctx in
-            ctx.setFillColor(color(hex).cgColor); ctx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
-        }
+    static func snapshotImage(view: SKView, scene: SKScene) -> CGImage? {
+        guard scene.size.width > 0, scene.size.height > 0 else { return nil }
+        // An explicit viewport crop includes the active camera and avoids exporting
+        // the larger world bounds when the user has zoomed out.
+        return view.texture(from: scene, crop: CGRect(origin: .zero, size: scene.size))?.cgImage()
+    }
+    static func imageURL(image: CGImage, screenID: String, current: URL?, in storage: URL = directory) -> URL? {
+        // Alternate two paths so macOS reloads changed pixels without accumulating files.
+        let first = "pond-\(screenID)-a.png"
+        let filename = current?.lastPathComponent == first ? "pond-\(screenID)-b.png" : first
+        let url = storage.appendingPathComponent(filename)
         guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return nil }
-        do { try data.write(to: url); return url } catch { return nil }
+        do { try data.write(to: url, options: .atomic); return url } catch { return nil }
     }
     static func key(_ screen: NSScreen) -> String? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue
     }
-    static func apply(screens: [NSScreen], water: UInt32, defaults: UserDefaults) {
-        guard let solid = solidImageURL(hex: water)?.standardizedFileURL else { return }
-        var saved = defaults.dictionary(forKey: "savedWallpapers") as? [String: [String: Any]] ?? [:]
-        for screen in screens {
-            guard let id = key(screen), let current = NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL else { continue }
-            if current.path == solid.path { continue }
-            if saved[id] == nil && !current.path.hasPrefix(directory.path + "/") { saved[id] = entry(for: current, screen: screen) }
-            try? NSWorkspace.shared.setDesktopImageURL(solid, for: screen, options: [NSWorkspace.DesktopImageOptionKey(rawValue: "NSFillScreen"): true])
+    static func stamp(for scene: PondScene) -> String {
+        let fish = scene.fishNodes.map { "\($0.designKey):\($0.xScale)" }.joined(separator: "|")
+        return "\(scene.floorStamp)|\(scene.size)|\(scene.preferences.distance)|\(fish)"
+    }
+    static func isManaged(_ url: URL) -> Bool {
+        url.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
+    }
+    static func apply(screen: NSScreen, frame: CGImage, stamp: String, defaults: UserDefaults, onlyManaged: Bool = false) {
+        guard let id = key(screen), let current = NSWorkspace.shared.desktopImageURL(for: screen)?.standardizedFileURL else { return }
+        // Wallpaper selection belongs to a Space, not just a physical screen. On
+        // Space changes upgrade our old green wallpapers, leaving unrelated ones alone.
+        guard !onlyManaged || isManaged(current) else { return }
+        let image: URL
+        if let cached = snapshots[id], cached.stamp == stamp {
+            image = cached.url
+        } else {
+            guard let url = imageURL(image: frame, screenID: id, current: current)?.standardizedFileURL else { return }
+            image = url; snapshots[id] = (stamp, url)
         }
+        guard current != image else { return }
+        var saved = defaults.dictionary(forKey: "savedWallpapers") as? [String: [String: Any]] ?? [:]
+        // The old solid wallpapers live in the same directory: retain their original
+        // backup during upgrades, and persist it before changing the system wallpaper.
+        if saved[id] == nil && !isManaged(current) { saved[id] = entry(for: current, screen: screen) }
         defaults.set(saved, forKey: "savedWallpapers")
+        try? NSWorkspace.shared.setDesktopImageURL(image, for: screen, options: [NSWorkspace.DesktopImageOptionKey(rawValue: "NSFillScreen"): true])
     }
     static func entry(for image: URL, screen: NSScreen) -> [String: Any] {
         var entry: [String: Any] = ["path": image.path]

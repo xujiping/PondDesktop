@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.3.0"
+let appVersion = "1.4.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -29,6 +29,7 @@ final class Preferences: ObservableObject {
     @Published var harmony: Bool { didSet { save() } }
     @Published var interact: Bool { didSet { save() } }
     @Published var feedModifier: String { didSet { save() } }
+    @Published var daylightMode: String { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { designData = nil; save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -48,6 +49,8 @@ final class Preferences: ObservableObject {
         harmony = d.object(forKey: "menuBarHarmony") == nil ? true : d.bool(forKey: "menuBarHarmony")
         interact = d.object(forKey: "mouseInteraction") == nil ? true : d.bool(forKey: "mouseInteraction")
         feedModifier = d.string(forKey: "feedModifier") ?? "option"
+        let savedDaylight = d.string(forKey: "daylightMode") ?? "auto"
+        daylightMode = savedDaylight == "auto" || Daylight.all[savedDaylight] != nil ? savedDaylight : "auto"
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -62,6 +65,7 @@ final class Preferences: ObservableObject {
         d.set(distance, forKey: "viewDistance"); d.set(vegetation, forKey: "plantDensity")
         d.set(harmony, forKey: "menuBarHarmony"); d.set(interact, forKey: "mouseInteraction")
         d.set(feedModifier, forKey: "feedModifier")
+        d.set(daylightMode, forKey: "daylightMode")
         if designData == nil { designData = try? JSONEncoder().encode(designs) }
         if let data = designData { d.set(data, forKey: "fishDesigns") }
         onChange?()
@@ -143,12 +147,16 @@ struct Swimmer {
 
 struct Palette {
     let water: UInt32, silt: UInt32, pebble: UInt32, leaf: UInt32
-    init(theme: String) {
+    init(theme: String, daylight: Daylight = .noon) {
+        let base: (water: UInt32, silt: UInt32, pebble: UInt32, leaf: UInt32)
         switch theme {
-        case "ink": water = 0x173D40; silt = 0x28504C; pebble = 0x59716A; leaf = 0x506E45
-        case "blue": water = 0x3B727C; silt = 0x4D8184; pebble = 0x82998B; leaf = 0x527F53
-        default: water = 0x385E50; silt = 0x737F59; pebble = 0x7D9280; leaf = 0x557340
+        case "ink": base = (0x173D40, 0x28504C, 0x59716A, 0x506E45)
+        case "blue": base = (0x3B727C, 0x4D8184, 0x82998B, 0x527F53)
+        default: base = (0x385E50, 0x737F59, 0x7D9280, 0x557340)
         }
+        // 时段光色直接烘进调色板：中午恒等，其余时段整体压暗并推向时段色。
+        water = daylight.apply(base.water); silt = daylight.apply(base.silt)
+        pebble = daylight.apply(base.pebble); leaf = daylight.apply(base.leaf)
     }
 }
 struct SeededRandom {
@@ -166,6 +174,8 @@ final class PondScene: SKScene {
     var configuredSize = CGSize.zero
     var floorStamp = ""
     var waterStamp = ""
+    var daylight = Daylight.noon
+    var daylightOverride: Daylight?
     var bedSprite: SKSpriteNode?
     var plantMotions: [PlantMotion] = []
     let water = PondWater()
@@ -188,7 +198,9 @@ final class PondScene: SKScene {
     func configure() {
         // The desktop has its own cached backing image; a recovering SpriteKit
         // drawable must never cover it with a solid green clear colour.
-        backgroundColor = view?.allowsTransparency == true ? .clear : color(Palette(theme: preferences.theme).water)
+        let daylight = daylightOverride ?? Daylight.effective(mode: preferences.daylightMode)
+        self.daylight = daylight
+        backgroundColor = view?.allowsTransparency == true ? .clear : color(Palette(theme: preferences.theme, daylight: daylight).water)
         let world = worldSize
         guard world.width > 56, world.height > 56 else { return }
         let rasterScale = (view?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) / preferences.distance
@@ -204,7 +216,7 @@ final class PondScene: SKScene {
         }
         // Slider drags re-bake only when a bucket (density 0.1, distance 0.125) changes; the bed
         // plate itself is proportional, so between buckets it is simply stretched for free.
-        let stamp = "\(preferences.theme)|\(Int((preferences.vegetation * 10).rounded()))|\(Int(size.width))x\(Int(size.height))|\(Int((preferences.distance * 8).rounded()))|\(String(format: "%.2f", rasterScale))"
+        let stamp = "\(preferences.theme)|\(daylight.key)|\(Int((preferences.vegetation * 10).rounded()))|\(Int(size.width))x\(Int(size.height))|\(Int((preferences.distance * 8).rounded()))|\(String(format: "%.2f", rasterScale))"
         if stamp != floorStamp { floorStamp = stamp; buildFloor(rasterScale: rasterScale) }
         bedSprite?.size = worldSize
         bedSprite?.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2)
@@ -212,10 +224,10 @@ final class PondScene: SKScene {
             // 任意设置变更都会走 configure：水面只在屏幕、视野、池底纹理或“减少动态效果”
             // 变化时重建，暂停、滑块等不再清掉进行中的涟漪和反光。
             let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            let stamp = "\(Int(size.width))x\(Int(size.height))|\(preferences.distance)|\(reducedMotion)|\(ObjectIdentifier(bed).hashValue)"
+            let stamp = "\(Int(size.width))x\(Int(size.height))|\(preferences.distance)|\(reducedMotion)|\(daylight.key)|\(ObjectIdentifier(bed).hashValue)"
             if stamp != waterStamp {
                 waterStamp = stamp
-                water.configure(size: worldSize, distance: preferences.distance, bed: bed, floor: floor, surface: surface, reducedMotion: reducedMotion)
+                water.configure(size: worldSize, distance: preferences.distance, bed: bed, floor: floor, surface: surface, reducedMotion: reducedMotion, daylight: daylight)
             }
         }
         animatePlants()
@@ -235,6 +247,7 @@ final class PondScene: SKScene {
                 replacement.zPosition = CGFloat(i % 3); inhabitants.addChild(replacement); fishNodes[i] = replacement
             }
             fishNodes[i].setScale(swimmers[i].length / 115 * design.size)
+            fishNodes[i].applyDaylight(daylight.tint, blend: daylight.fishBlend)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
         }
         view?.preferredFramesPerSecond = preferences.lowPower ? 20 : 30
@@ -248,8 +261,8 @@ final class PondScene: SKScene {
     func buildFloor(rasterScale: CGFloat) {
         floor.removeAllChildren(); plants.removeAllChildren(); plantMotions.removeAll()
         if plants.parent == nil { surface.addChild(plants) }
-        let palette = Palette(theme: preferences.theme)
-        let artwork = PondEnvironment.make(size: worldSize, density: preferences.vegetation, palette: palette, rasterScale: rasterScale)
+        let palette = Palette(theme: preferences.theme, daylight: daylight)
+        let artwork = PondEnvironment.make(size: worldSize, density: preferences.vegetation, palette: palette, daylight: daylight, rasterScale: rasterScale)
         let bed = SKSpriteNode(texture: SKTexture(cgImage: artwork.bed), size: worldSize)
         bed.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2); bed.zPosition = -1; floor.addChild(bed)
         bedSprite = bed
@@ -257,6 +270,8 @@ final class PondScene: SKScene {
             let sprite = PlantPainter.sprite(placement)
             if placement.submerged {
                 sprite.alpha = 0.64; sprite.color = color(palette.water); sprite.colorBlendFactor = 0.18
+            } else if daylight.plantBlend > 0 {
+                sprite.color = color(daylight.tint); sprite.colorBlendFactor = daylight.plantBlend
             }
             (placement.submerged ? floor : plants).addChild(sprite)
             plantMotions.append(PlantMotion(sprite: sprite, placement: placement))
@@ -380,7 +395,7 @@ struct SettingsView: View {
                 }.padding(.bottom, 5)
                 HStack(spacing: 7) {
                     Circle().fill(Color(nsColor: color(0xB5C590))).frame(width: 6, height: 6)
-                    Text(preferences.enabled ? (preferences.paused ? "池塘已暂停" : "金鱼正在桌面游动") : "桌面池塘已关闭").font(.system(size: 11)).foregroundStyle(muted)
+                    Text(preferences.enabled ? (preferences.paused ? "池塘已暂停" : "金鱼正在桌面游动 · \(Daylight.effective(mode: preferences.daylightMode).name)") : "桌面池塘已关闭").font(.system(size: 11)).foregroundStyle(muted)
                 }
                 divider
                 sectionLabel("池塘里的居民")
@@ -396,6 +411,14 @@ struct SettingsView: View {
                 divider
                 sectionLabel("一汪池水")
                 HStack(spacing: 10) { themeButton("jade", "青池", 0x385E50); themeButton("ink", "墨池", 0x173D40); themeButton("blue", "晴池", 0x3B727C) }
+                VStack(spacing: 6) {
+                    HStack { Text("时间光线"); Spacer(); Text(Daylight.effective(mode: preferences.daylightMode).name).foregroundStyle(muted) }
+                    Picker("时间光线", selection: $preferences.daylightMode) {
+                        ForEach([("auto", "自动"), ("dawn", "凌晨"), ("noon", "中午"), ("dusk", "傍晚"), ("night", "晚上")], id: \.0) { choice in
+                            Text(choice.1).tag(choice.0)
+                        }
+                    }.labelsHidden().pickerStyle(.segmented)
+                }
                 VStack(spacing: 6) {
                     HStack { Text("视野远近"); Spacer(); Text(String(format: "%.2f ×", preferences.distance)).monospacedDigit().foregroundStyle(muted) }
                     Slider(value: $preferences.distance, in: 1...2.4)
@@ -491,13 +514,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var rebuilding = false
     var systemSuspended = false
     var settingsWork: DispatchWorkItem?
+    var daylightTimer: Timer?
     var rendering = false
     let stream = CursorStream()
     var cursorMonitors: [Any] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--self-test") { runSelfTests(); return }
         if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > index + 1 {
-            rendering = true; renderPreview(to: CommandLine.arguments[index + 1]); return
+            rendering = true
+            let daylight = CommandLine.arguments.firstIndex(of: "--daylight").flatMap { offset in
+                CommandLine.arguments.count > offset + 1 ? Daylight.all[CommandLine.arguments[offset + 1]] : nil
+            }
+            renderPreview(to: CommandLine.arguments[index + 1], daylight: daylight)
+            return
         }
         if let index = CommandLine.arguments.firstIndex(of: "--render-matrix"), CommandLine.arguments.count > index + 1 {
             rendering = true; renderMatrix(to: CommandLine.arguments[index + 1]); return
@@ -522,6 +551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             observers.append(nc.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.suspend(false) })
         }
         rebuildDesktop()
+        // 自动时段按本地时钟在边界切换：每分钟对表一次，唤醒后的刷新在 suspend(false) 里做。
+        daylightTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.applySettings() }
         let hasLaunched = UserDefaults.standard.bool(forKey: "hasLaunched")
         if !hasLaunched || CommandLine.arguments.contains("--preview") { showPreview() }
         UserDefaults.standard.set(true, forKey: "hasLaunched")
@@ -620,6 +651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for scene in desktopScenes + (previewScene.map { [$0] } ?? []) {
             scene.lastTime = 0; scene.isPaused = value || preferences.paused
         }
+        if !value { applySettings() }  // 唤醒后立即对齐时段光色
     }
     func feedAll() {
         if preferences.paused { preferences.paused = false }
@@ -658,9 +690,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editorState?.flush(); closeDesktop()
         if !rendering { WallpaperSync.restore(defaults: preferences.defaults) }
     }
-    func renderPreview(to output: String) {
+    func renderPreview(to output: String, daylight: Daylight? = nil) {
         NSApp.setActivationPolicy(.accessory)
         let scene = PondScene(size: CGSize(width: 1440, height: 900), preferences: preferences)
+        scene.daylightOverride = daylight
         let window = PreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900), styleMask: .borderless, backing: .buffered, defer: false)
         let view = SKView(frame: window.contentLayoutRect); view.presentScene(scene); window.contentView = view
         previewWindow = window; window.orderFront(nil)
@@ -682,6 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let suite = "studio.yichi.matrix.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         let preferences = Preferences(defaults: defaults)
+        preferences.daylightMode = "noon"  // 矩阵固定中午光色，便于跨版本对比
         let window = PreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900), styleMask: .borderless, backing: .buffered, defer: false)
         let view = SKView(frame: window.contentLayoutRect); window.contentView = view
         window.orderFront(nil)
@@ -745,6 +779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let isolated = UserDefaults(suiteName: suite)!
         defer { isolated.removePersistentDomain(forName: suite) }
         let preferences = Preferences(defaults: isolated)
+        preferences.daylightMode = "noon"  // 固定中午光色（恒等），其余时段由 runDaylightChecks 覆盖
         var random = SeededRandom()
         for speed in [0.3, 0.8, 1.8] {
             for dimensions in [(1440.0, 900.0), (800.0, 600.0), (3440.0, 1440.0)] {

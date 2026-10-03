@@ -125,9 +125,60 @@ func runDesignChecks(preferences: Preferences) {
     runVegetationChecks()
     runInteractionChecks(preferences: preferences)
     runWaterChecks(preferences: preferences)
+    runDaylightChecks(preferences: preferences)
     runPlantMotionChecks(preferences: preferences)
     runDesktopPresentationChecks(preferences: preferences)
     print("通过：单尾颜色/大小/笔画持久化、鱼身裁切、橡皮底色恢复、撤销重做、鱼群纹理更新、相机缩放和零尺寸窗口保护。")
+}
+
+func runDaylightChecks(preferences: Preferences) {
+    let calendar = Calendar.current
+    func at(_ hour: Int) -> Date { calendar.date(from: DateComponents(hour: hour, minute: 30))! }
+    for (hour, key) in [(0, "night"), (3, "night"), (4, "dawn"), (10, "dawn"), (11, "noon"), (16, "noon"), (17, "dusk"), (19, "dusk"), (20, "night"), (23, "night")] {
+        precondition(Daylight.effective(mode: "auto", date: at(hour)).key == key, "自动时段必须在 \(hour) 点半映射到 \(key)")
+    }
+    for (mode, key) in [("dawn", "dawn"), ("noon", "noon"), ("dusk", "dusk"), ("night", "night")] {
+        precondition(Daylight.effective(mode: mode, date: at(12)).key == key, "手动时段必须优先于时钟")
+    }
+    func luminance(_ hex: UInt32) -> Double {
+        Double((hex >> 16) & 255) * 0.3 + Double((hex >> 8) & 255) * 0.6 + Double(hex & 255) * 0.1
+    }
+    let noonPalette = Palette(theme: "jade", daylight: .noon)
+    precondition(noonPalette.water == 0x385E50 && noonPalette.silt == 0x737F59, "中午必须保持主题原色")
+    let nightWater = Palette(theme: "jade", daylight: .night).water
+    let dawnWater = Palette(theme: "jade", daylight: .dawn).water
+    let duskWater = Palette(theme: "jade", daylight: .dusk).water
+    precondition(luminance(nightWater) < luminance(dawnWater) && luminance(dawnWater) < luminance(noonPalette.water), "夜晚必须比凌晨暗，凌晨比中午暗")
+    precondition((nightWater & 255) > ((nightWater >> 16) & 255), "夜晚水色必须偏冷蓝")
+    precondition(((duskWater >> 16) & 255) > (duskWater & 255), "傍晚水色必须偏暖")
+    func meanLuminance(_ image: CGImage) -> Double {
+        let rep = NSBitmapImageRep(cgImage: image)
+        var total = 0.0
+        for y in stride(from: 0, to: rep.pixelsHigh, by: 24) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 24) {
+                let sample = rep.colorAt(x: x, y: y)!.usingColorSpace(.deviceRGB)!
+                total += Double(sample.redComponent + sample.greenComponent + sample.blueComponent)
+            }
+        }
+        return total
+    }
+    let world = CGSize(width: 1440, height: 900)
+    let noonBed = PondEnvironment.make(size: world, density: 1.15, palette: noonPalette, daylight: .noon, rasterScale: 1).bed
+    let nightBed = PondEnvironment.make(size: world, density: 1.15, palette: Palette(theme: "jade", daylight: .night), daylight: .night, rasterScale: 1).bed
+    precondition(meanLuminance(nightBed) < meanLuminance(noonBed) * 0.8, "夜晚的池底烘焙必须明显变暗")
+    preferences.daylightMode = "night"
+    let scene = PondScene(size: world, preferences: preferences)
+    precondition(scene.floorStamp.contains("night"), "池底缓存签名必须包含时段")
+    precondition(scene.fishNodes[0].daylightBlend > 0.1, "夜晚的金鱼必须压暗")
+    precondition(scene.water.glints.first!.sprite.colorBlendFactor > 0.3, "夜晚的反光必须染成月光色")
+    let floating = scene.plantMotions.first { !$0.placement.submerged }!
+    precondition(floating.sprite.colorBlendFactor > 0.1, "夜晚的浮叶必须带时段色")
+    let nightStamp = scene.floorStamp
+    preferences.daylightMode = "noon"
+    scene.configure()
+    precondition(scene.floorStamp != nightStamp, "时段变化必须重建池底")
+    precondition(scene.fishNodes[0].daylightBlend == 0, "中午的金鱼不能带时段色")
+    print("通过：时段映射覆盖全天、中午恒等、夜晚更暗更冷、傍晚偏暖、池底压暗烘焙，以及鱼/浮叶/反光的时段染色与签名重建。")
 }
 
 func runWaterChecks(preferences: Preferences) {

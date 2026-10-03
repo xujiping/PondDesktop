@@ -151,6 +151,8 @@ enum FishPainter {
 final class FishNode: SKNode {
     let tail = SKNode(), leftFin = SKNode(), rightFin = SKNode(), body = SKNode(), shadowLayer = SKNode()
     let designKey: Int
+    private var tintables: [SKSpriteNode] = []
+    private(set) var daylightBlend: CGFloat = 0
     init(index: Int, design: FishDesign, size: Double) {
         designKey = design.artworkKey
         super.init()
@@ -161,10 +163,19 @@ final class FishNode: SKNode {
         for (node, part) in zip(nodes, FishPainter.parts(design)) {
             let sprite = SKSpriteNode(texture: part.texture, size: part.bounds.size)
             sprite.position = CGPoint(x: part.bounds.midX, y: part.bounds.midY); node.addChild(sprite); addChild(node)
+            tintables.append(sprite)
         }
         setScale(size / 115 * design.size)
     }
     required init?(coder: NSCoder) { fatalError() }
+    // 时段光色直接染在共享纹理的实例上，不重新绘制纹理；中午比例归零。
+    func applyDaylight(_ tint: UInt32, blend: CGFloat) {
+        daylightBlend = blend
+        for sprite in tintables {
+            if blend > 0 { sprite.color = color(tint) }
+            sprite.colorBlendFactor = blend
+        }
+    }
     func animate(time: Double, swimmer: Swimmer, speed: Double) {
         position = CGPoint(x: swimmer.x, y: swimmer.y); zRotation = swimmer.angle
         let beat = time * (3.8 + speed * 1.4) + swimmer.phase

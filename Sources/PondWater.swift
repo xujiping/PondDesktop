@@ -82,6 +82,7 @@ final class PondWater {
     private let impulses = (0..<3).map { SKUniform(name: "u_impulse\($0)", vectorFloat4: SIMD4<Float>(0, 0, 0, 0)) }
     private var distance = 1.0
     private(set) var reducedMotion = false
+    private(set) var daylight = Daylight.noon
 
     // 偏移量以屏幕点为单位；相机拉远后水纹不会缩水。
     private static let rippleDisplacement = """
@@ -111,8 +112,8 @@ final class PondWater {
         rippleLayer.zPosition = -1
     }
 
-    func configure(size: CGSize, distance: Double, bed: SKSpriteNode, floor: SKNode, surface: SKNode, reducedMotion: Bool) {
-        self.distance = distance; self.reducedMotion = reducedMotion
+    func configure(size: CGSize, distance: Double, bed: SKSpriteNode, floor: SKNode, surface: SKNode, reducedMotion: Bool, daylight: Daylight = .noon) {
+        self.distance = distance; self.reducedMotion = reducedMotion; self.daylight = daylight
         refractionSize.vectorFloat2Value = SIMD2(Float(size.width / distance), Float(size.height / distance))
         bed.shader = reducedMotion ? nil : refraction
         reflections.removeAllChildren(); glints.removeAll()
@@ -123,7 +124,7 @@ final class PondWater {
             let glint = WaterGlint(texture: WaterArtwork.reflections[i % 4],
                                    anchor: CGPoint(x: random.range(0.08, 0.92) * size.width,
                                                    y: random.range(0.08, 0.92) * size.height),
-                                   phase: random.range(0, tau), distance: distance)
+                                   phase: random.range(0, tau), distance: distance, daylight: daylight)
             reflections.addChild(glint.sprite); glints.append(glint)
             glint.update(time: 0)
         }
@@ -174,11 +175,16 @@ final class PondWater {
 }
 
 // 稀疏反光各自出现、变淡；位置只在小范围内漂移，不做全屏平铺。
+// 光色随时段变化：中午保持纹理原色，夜晚月光偏冷、傍晚偏金。
 struct WaterGlint {
     let sprite: SKSpriteNode
     let anchor: CGPoint, phase: Double, distance: Double
-    init(texture: SKTexture, anchor: CGPoint, phase: Double, distance: Double) {
+    private let alphaScale: Double
+    init(texture: SKTexture, anchor: CGPoint, phase: Double, distance: Double, daylight: Daylight = .noon) {
         sprite = SKSpriteNode(texture: texture, size: CGSize(width: 160 * distance, height: 42 * distance))
+        sprite.color = color(daylight.glow)
+        sprite.colorBlendFactor = daylight.glintBlend
+        alphaScale = daylight.glowAlpha
         self.anchor = anchor; self.phase = phase; self.distance = distance
     }
     func update(time: Double) {
@@ -186,6 +192,6 @@ struct WaterGlint {
         sprite.position = CGPoint(x: anchor.x + sin(t * 0.7) * 9 * distance,
                                   y: anchor.y + sin(t * 0.83 + 1) * 4 * distance)
         sprite.zRotation = sin(t * 0.6) * 0.035
-        sprite.alpha = 0.055 + 0.085 * pow((sin(t) + 1) / 2, 3)
+        sprite.alpha = (0.055 + 0.085 * pow((sin(t) + 1) / 2, 3)) * alphaScale
     }
 }

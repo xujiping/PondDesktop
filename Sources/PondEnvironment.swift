@@ -68,7 +68,7 @@ enum PondEnvironment {
         return result
     }
 
-    static func make(size: CGSize, density: Double, palette: Palette, rasterScale: CGFloat) -> PondArtwork {
+    static func make(size: CGSize, density: Double, palette: Palette, daylight: Daylight = .noon, rasterScale: CGFloat) -> PondArtwork {
         let scale = min(rasterScale, 4096 / max(size.width, size.height))
         let bounds = CGRect(origin: .zero, size: size)
         let bed = bitmap(bounds: bounds, scale: scale) { ctx in
@@ -76,27 +76,27 @@ enum PondEnvironment {
             var rng = SeededRandom(state: 182954)
             for _ in 0..<210 {
                 let center = CGPoint(x: rng.range(0, size.width), y: rng.range(0, size.height)), r = rng.range(16, 125)
-                fill(ctx, organic(center: center, radius: r, random: &rng), rng.next() < 0.5 ? palette.silt : 0x273F30, alpha: rng.range(0.025, 0.065))
+                fill(ctx, organic(center: center, radius: r, random: &rng), rng.next() < 0.5 ? palette.silt : daylight.apply(0x273F30), alpha: rng.range(0.025, 0.065))
             }
             let grains = min(75000, Int(size.width * size.height / 42))
             for _ in 0..<grains {
                 let r = rng.range(0.25, 1.05)
-                ctx.setFillColor(color(rng.next() < 0.58 ? 0xBDBDA1 : 0x213F31, rng.range(0.04, 0.15)).cgColor)
+                ctx.setFillColor(color(daylight.apply(rng.next() < 0.58 ? 0xBDBDA1 : 0x213F31), rng.range(0.04, 0.15)).cgColor)
                 ctx.fill(CGRect(x: rng.range(0, size.width), y: rng.range(0, size.height), width: r, height: r * 0.7))
             }
             for _ in 0..<480 {
                 let center = CGPoint(x: rng.range(0, size.width), y: rng.range(0, size.height))
-                pebble(ctx, at: center, radius: rng.range(1.2, 7), random: &rng, alpha: 0.32)
+                pebble(ctx, at: center, radius: rng.range(1.2, 7), random: &rng, daylight: daylight, alpha: 0.32)
             }
             for cluster in clusters(size: size) {
                 for _ in 0..<Int((cluster.interior ? 13 : 27) * density) {
                     let a = rng.range(0, tau), d = rng.range(0, cluster.spread * 1.1)
-                    pebble(ctx, at: CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.72), radius: rng.range(4, 14) * plantUnit(size: size), random: &rng, alpha: 0.44)
+                    pebble(ctx, at: CGPoint(x: cluster.center.x + cos(a) * d, y: cluster.center.y + sin(a) * d * 0.72), radius: rng.range(4, 14) * plantUnit(size: size), random: &rng, daylight: daylight, alpha: 0.44)
                 }
             }
             for _ in 0..<26 {
                 let x = rng.range(0, size.width), y = rng.range(0, size.height), w = rng.range(55, 180)
-                line(ctx, path { p in p.move(to: CGPoint(x: x, y: y)); p.addCurve(to: CGPoint(x: x + w, y: y + 18), control1: CGPoint(x: x + w * 0.3, y: y + 35), control2: CGPoint(x: x + w * 0.55, y: y - 35)) }, 0xD3D8AB, width: 0.8, alpha: 0.07)
+                line(ctx, path { p in p.move(to: CGPoint(x: x, y: y)); p.addCurve(to: CGPoint(x: x + w, y: y + 18), control1: CGPoint(x: x + w * 0.3, y: y + 35), control2: CGPoint(x: x + w * 0.55, y: y - 35)) }, daylight.apply(0xD3D8AB), width: 0.8, alpha: 0.07)
             }
         }
         return PondArtwork(bed: bed, vegetation: placements(size: size, density: density))
@@ -111,11 +111,11 @@ enum PondEnvironment {
             p.closeSubpath()
         }
     }
-    static func pebble(_ ctx: CGContext, at center: CGPoint, radius: Double, random: inout SeededRandom, alpha: Double) {
+    static func pebble(_ ctx: CGContext, at center: CGPoint, radius: Double, random: inout SeededRandom, daylight: Daylight = .noon, alpha: Double) {
         let p = organic(center: center, radius: radius, random: &random, count: 9)
-        ctx.saveGState(); ctx.translateBy(x: 2, y: -2); fill(ctx, p, 0x183D32, alpha: alpha * 0.6); ctx.restoreGState()
-        let shades: [UInt32] = [0x849181, 0x6D8171, 0xA5A28A, 0x5E7469, 0x8C8B72]
+        ctx.saveGState(); ctx.translateBy(x: 2, y: -2); fill(ctx, p, daylight.apply(0x183D32), alpha: alpha * 0.6); ctx.restoreGState()
+        let shades: [UInt32] = [0x849181, 0x6D8171, 0xA5A28A, 0x5E7469, 0x8C8B72].map { daylight.apply($0) }
         fill(ctx, p, shades[Int(random.range(0, 4.99))], alpha: alpha)
-        line(ctx, path { p in p.move(to: CGPoint(x: center.x - radius * 0.5, y: center.y + radius * 0.36)); p.addQuadCurve(to: CGPoint(x: center.x + radius * 0.45, y: center.y + radius * 0.36), control: CGPoint(x: center.x, y: center.y + radius * 0.68)) }, 0xD8CFAB, width: max(0.45, radius / 12), alpha: alpha * 0.4)
+        line(ctx, path { p in p.move(to: CGPoint(x: center.x - radius * 0.5, y: center.y + radius * 0.36)); p.addQuadCurve(to: CGPoint(x: center.x + radius * 0.45, y: center.y + radius * 0.36), control: CGPoint(x: center.x, y: center.y + radius * 0.68)) }, daylight.apply(0xD8CFAB), width: max(0.45, radius / 12), alpha: alpha * 0.4)
     }
 }

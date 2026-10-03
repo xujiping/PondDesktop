@@ -29,9 +29,12 @@ final class Preferences: ObservableObject {
     @Published var harmony: Bool { didSet { save() } }
     @Published var interact: Bool { didSet { save() } }
     @Published var feedModifier: String { didSet { save() } }
-    @Published var designs: [FishDesign] { didSet { save() } }
+    @Published var designs: [FishDesign] { didSet { designData = nil; save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
+    // 60 尾鱼的笔画数据可能很大；只有 designs 本身变化才重新编码，
+    // 其余设置项保存时直接复用上次的 JSON。
+    private var designData: Data?
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let d = defaults
@@ -59,7 +62,8 @@ final class Preferences: ObservableObject {
         d.set(distance, forKey: "viewDistance"); d.set(vegetation, forKey: "plantDensity")
         d.set(harmony, forKey: "menuBarHarmony"); d.set(interact, forKey: "mouseInteraction")
         d.set(feedModifier, forKey: "feedModifier")
-        if let data = try? JSONEncoder().encode(designs) { d.set(data, forKey: "fishDesigns") }
+        if designData == nil { designData = try? JSONEncoder().encode(designs) }
+        if let data = designData { d.set(data, forKey: "fishDesigns") }
         onChange?()
     }
 }
@@ -69,7 +73,7 @@ struct Swimmer {
     var turn: Double = 0
     var startledUntil = 0.0, startledFrom = CGPoint.zero
     var meal = CGPoint.zero, hasMeal = false
-    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, targets: [CGPoint], neighbours: [CGPoint], cursor: CGPoint? = nil, curious: Bool = false, cursorRadius: Double = 0) {
+    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, targets: [CGPoint], positions: [CGPoint], index: Int, cursor: CGPoint? = nil, curious: Bool = false, cursorRadius: Double = 0) {
         var desired = angle + sin(time * 0.37 + phase) * 0.45 + sin(time * 0.17 + phase * 3) * 0.22
         let margin = min(150.0, min(width, height) * 0.2)
         var fx = cos(desired), fy = sin(desired)
@@ -77,7 +81,7 @@ struct Swimmer {
         if x > width - margin { fx -= (x - width + margin) / margin * 3.5 }
         if y < margin { fy += (margin - y) / margin * 3.5 }
         if y > height - margin { fy -= (y - height + margin) / margin * 3.5 }
-        for p in neighbours {
+        for (j, p) in positions.enumerated() where j != index {
             let dx = x - p.x, dy = y - p.y, d2 = dx * dx + dy * dy
             if d2 > 1 && d2 < 85 * 85 { let d = sqrt(d2); fx += dx / d * (1 - d / 85) * 0.7; fy += dy / d * (1 - d / 85) * 0.7 }
         }
@@ -161,6 +165,7 @@ final class PondScene: SKScene {
     var worldSize: CGSize { CGSize(width: size.width * preferences.distance, height: size.height * preferences.distance) }
     var configuredSize = CGSize.zero
     var floorStamp = ""
+    var waterStamp = ""
     var bedSprite: SKSpriteNode?
     var plantMotions: [PlantMotion] = []
     let water = PondWater()
@@ -204,8 +209,14 @@ final class PondScene: SKScene {
         bedSprite?.size = worldSize
         bedSprite?.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2)
         if let bed = bedSprite {
-            water.configure(size: worldSize, distance: preferences.distance, bed: bed, floor: floor, surface: surface,
-                            reducedMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+            // 任意设置变更都会走 configure：水面只在屏幕、视野、池底纹理或“减少动态效果”
+            // 变化时重建，暂停、滑块等不再清掉进行中的涟漪和反光。
+            let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let stamp = "\(Int(size.width))x\(Int(size.height))|\(preferences.distance)|\(reducedMotion)|\(ObjectIdentifier(bed).hashValue)"
+            if stamp != waterStamp {
+                waterStamp = stamp
+                water.configure(size: worldSize, distance: preferences.distance, bed: bed, floor: floor, surface: surface, reducedMotion: reducedMotion)
+            }
         }
         animatePlants()
         let count = Int(preferences.count.rounded())
@@ -311,11 +322,10 @@ final class PondScene: SKScene {
             }
         }
         let cursorRadius = min(worldSize.width, worldSize.height) * 0.35
+        let targets = foodSpots.map { $0.position }
         let positions = swimmers.map { CGPoint(x: $0.x, y: $0.y) }
         for i in swimmers.indices {
-            var near: [CGPoint] = []
-            for j in positions.indices where j != i { near.append(positions[j]) }
-            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, targets: foodSpots.map { $0.position }, neighbours: near, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
+            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, targets: targets, positions: positions, index: i, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
         }
         // 浅水中的鱼偶尔带动水面，保持稀疏尾波，避免每条鱼都画出一圈圈靶心。
@@ -674,7 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let points = school.map { CGPoint(x: $0.x, y: $0.y) }
                     for i in school.indices {
                         let target = frame > 900 ? CGPoint(x: dimensions.0 / 2, y: dimensions.1 / 2) : nil
-                        school[i].step(dt: 1.0 / 30, time: Double(frame) / 30, width: dimensions.0, height: dimensions.1, speed: speed, targets: target.map { [$0] } ?? [], neighbours: Array(points.enumerated().filter { $0.offset != i }.map { $0.element }))
+                        school[i].step(dt: 1.0 / 30, time: Double(frame) / 30, width: dimensions.0, height: dimensions.1, speed: speed, targets: target.map { [$0] } ?? [], positions: points, index: i)
                         let fish = school[i]
                         precondition(fish.x.isFinite && fish.y.isFinite && fish.angle.isFinite, "鱼群状态必须为有限数")
                         precondition(fish.x >= 28 && fish.x <= dimensions.0 - 28 && fish.y >= 28 && fish.y <= dimensions.1 - 28, "金鱼不能越过边界")

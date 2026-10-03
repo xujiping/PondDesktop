@@ -165,7 +165,6 @@ final class FishNode: SKNode {
         setScale(size / 115 * design.size)
     }
     required init?(coder: NSCoder) { fatalError() }
-    func bake(using view: SKView) { }
     func animate(time: Double, swimmer: Swimmer, speed: Double) {
         position = CGPoint(x: swimmer.x, y: swimmer.y); zRotation = swimmer.angle
         let beat = time * (3.8 + speed * 1.4) + swimmer.phase

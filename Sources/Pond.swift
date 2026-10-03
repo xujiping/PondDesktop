@@ -499,6 +499,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > index + 1 {
             rendering = true; renderPreview(to: CommandLine.arguments[index + 1]); return
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--render-matrix"), CommandLine.arguments.count > index + 1 {
+            rendering = true; renderMatrix(to: CommandLine.arguments[index + 1]); return
+        }
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         installMainMenu()
@@ -662,12 +665,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let view = SKView(frame: window.contentLayoutRect); view.presentScene(scene); window.contentView = view
         previewWindow = window; window.orderFront(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            guard let texture = view.texture(from: scene) else { print("无法生成预览"); exit(1) }
-            let rep = NSBitmapImageRep(cgImage: texture.cgImage())
-            guard let data = rep.representation(using: .png, properties: [:]) else { exit(1) }
-            do { try data.write(to: URL(fileURLWithPath: output)); print("预览已保存：\(output)"); NSApp.terminate(nil) }
-            catch { print(error); exit(1) }
+            guard let image = WallpaperSync.snapshotImage(view: view, scene: scene), self.writePNG(image, to: URL(fileURLWithPath: output))
+            else { print("无法生成预览"); exit(1) }
+            print("预览已保存：\(output)"); NSApp.terminate(nil)
         }
+    }
+    func writePNG(_ image: CGImage, to url: URL) -> Bool {
+        guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return false }
+        do { try data.write(to: url, options: .atomic); return true } catch { return false }
+    }
+    // 3 主题 × 3 视野 × 3 丰茂度的批量截图，附 index.html 拼览页；用隔离偏好，不触碰真实设置与壁纸。
+    func renderMatrix(to directory: String) {
+        NSApp.setActivationPolicy(.accessory)
+        let url = URL(fileURLWithPath: directory)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let suite = "studio.yichi.matrix.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let preferences = Preferences(defaults: defaults)
+        let window = PreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900), styleMask: .borderless, backing: .buffered, defer: false)
+        let view = SKView(frame: window.contentLayoutRect); window.contentView = view
+        window.orderFront(nil)
+        var rows: [(theme: String, file: String, distance: Double, density: Double)] = []
+        for theme in ["jade", "ink", "blue"] {
+            for distance in [1.0, 1.65, 2.4] {
+                for density in [0.5, 1.15, 1.8] {
+                    rows.append((theme, "pond-\(theme)-d\(String(format: "%.2f", distance))-v\(String(format: "%.1f", density)).png", distance, density))
+                }
+            }
+        }
+        func step(_ index: Int) {
+            guard index < rows.count else {
+                try? Self.matrixHTML(rows: rows).write(to: url.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+                defaults.removePersistentDomain(forName: suite)
+                print("矩阵已保存：\(url.path)（\(rows.count) 张 + index.html）"); NSApp.terminate(nil)
+                return
+            }
+            let row = rows[index]
+            preferences.theme = row.theme; preferences.distance = row.distance; preferences.vegetation = row.density
+            let scene = PondScene(size: CGSize(width: 1440, height: 900), preferences: preferences)
+            view.presentScene(scene)
+            // 首帧包含着色器编译，多等一点；之后各组合 0.7 秒足够游出自然姿态。
+            DispatchQueue.main.asyncAfter(deadline: .now() + (index == 0 ? 1.5 : 0.7)) {
+                guard let image = WallpaperSync.snapshotImage(view: view, scene: scene), self.writePNG(image, to: url.appendingPathComponent(row.file))
+                else { print("无法生成预览"); exit(1) }
+                print("已渲染 \(index + 1)/\(rows.count)：\(row.file)")
+                step(index + 1)
+            }
+        }
+        step(0)
+    }
+    static func matrixHTML(rows: [(theme: String, file: String, distance: Double, density: Double)]) -> String {
+        let names = ["jade": "青池", "ink": "墨池", "blue": "晴池"]
+        var sheets = ""
+        for theme in ["jade", "ink", "blue"] {
+            sheets += "<h2>\(names[theme] ?? theme)</h2><table>"
+            for distance in [1.0, 1.65, 2.4] {
+                sheets += "<tr>"
+                for density in [0.5, 1.15, 1.8] {
+                    let row = rows.first { $0.theme == theme && $0.distance == distance && $0.density == density }!
+                    sheets += "<td><img src=\"\(row.file)\" alt=\"\(row.file)\"><div class=\"cap\">\(String(format: "%.2f", distance)) × · 丰茂 \(String(format: "%.1f", density))</div></td>"
+                }
+                sheets += "</tr>"
+            }
+            sheets += "</table>"
+        }
+        return """
+        <!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>一池 · 渲染矩阵</title>
+        <style>body{background:#152B23;color:#EDEAD8;font:14px -apple-system;margin:28px}
+        h1{font-size:19px;font-weight:600}h2{font-size:15px;margin:22px 0 10px;letter-spacing:2px}
+        table{border-collapse:collapse}td{padding:6px;text-align:center;font-size:12px;opacity:.85}
+        img{width:380px;border-radius:8px;display:block}</style></head><body>
+        <h1>一池渲染矩阵 · 3 主题 × 3 视野 × 3 丰茂度</h1>\(sheets)</body></html>
+        """
     }
     func runSelfTests() {
         rendering = true

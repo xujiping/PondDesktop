@@ -52,7 +52,10 @@ open build/一池.app
 ```sh
 build/一池.app/Contents/MacOS/PondDesktop --self-test
 build/一池.app/Contents/MacOS/PondDesktop --render-preview /absolute/path/to/pond.png
+build/一池.app/Contents/MacOS/PondDesktop --render-matrix /absolute/path/to/dir
 ```
+
+`--render-preview` 输出当前偏好下的单张 1440×900 高清预览；`--render-matrix` 用隔离偏好一次性渲染青池/墨池/晴池 × 1.00/1.65/2.40 视野 × 疏朗/自然/丰茂共 27 张截图，并生成 index.html 拼览页，调整画风后可逐项对比，全程不触碰真实设置与壁纸。
 
 自检使用独立偏好域，不修改真实鱼群外观或系统壁纸。它验证 60 尾鱼在 3 档速度及 3 种屏幕尺寸下连续模拟 60 秒的边界、有限值和转向速度，以及暂停恢复、投喂、单尾外观持久化、画笔裁切、橡皮恢复底色、撤销重做、鱼群纹理更新、相机缩放、零尺寸窗口保护及池塘壁纸的提前生成、相机一致性、屏幕比例、不透明底色、高清 PNG 和双文件复用；交互部分验证涟漪节流、急挥惊散只触发一次、轻点与拖拽区分、桌面空白判定、光标世界坐标换算、好奇靠近与受惊逃逸。
 

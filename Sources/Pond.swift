@@ -28,6 +28,7 @@ final class Preferences: ObservableObject {
     @Published var vegetation: Double { didSet { save() } }
     @Published var harmony: Bool { didSet { save() } }
     @Published var interact: Bool { didSet { save() } }
+    @Published var feedModifier: String { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -43,6 +44,7 @@ final class Preferences: ObservableObject {
         vegetation = d.object(forKey: "plantDensity") == nil ? 1.15 : clamp(d.double(forKey: "plantDensity"), 0.5, 1.8)
         harmony = d.object(forKey: "menuBarHarmony") == nil ? true : d.bool(forKey: "menuBarHarmony")
         interact = d.object(forKey: "mouseInteraction") == nil ? true : d.bool(forKey: "mouseInteraction")
+        feedModifier = d.string(forKey: "feedModifier") ?? "option"
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -56,6 +58,7 @@ final class Preferences: ObservableObject {
         d.set(lowPower, forKey: "lowPower")
         d.set(distance, forKey: "viewDistance"); d.set(vegetation, forKey: "plantDensity")
         d.set(harmony, forKey: "menuBarHarmony"); d.set(interact, forKey: "mouseInteraction")
+        d.set(feedModifier, forKey: "feedModifier")
         if let data = try? JSONEncoder().encode(designs) { d.set(data, forKey: "fishDesigns") }
         onChange?()
     }
@@ -65,7 +68,8 @@ struct Swimmer {
     var x: Double, y: Double, angle: Double, cruise: Double, phase: Double, length: Double
     var turn: Double = 0
     var startledUntil = 0.0, startledFrom = CGPoint.zero
-    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, target: CGPoint?, neighbours: [CGPoint], cursor: CGPoint? = nil, curious: Bool = false, cursorRadius: Double = 0) {
+    var meal = CGPoint.zero, hasMeal = false
+    mutating func step(dt: Double, time: Double, width: Double, height: Double, speed: Double, targets: [CGPoint], neighbours: [CGPoint], cursor: CGPoint? = nil, curious: Bool = false, cursorRadius: Double = 0) {
         var desired = angle + sin(time * 0.37 + phase) * 0.45 + sin(time * 0.17 + phase * 3) * 0.22
         let margin = min(150.0, min(width, height) * 0.2)
         var fx = cos(desired), fy = sin(desired)
@@ -85,17 +89,48 @@ struct Swimmer {
             let dx = c.x - x, dy = c.y - y, distance = hypot(dx, dy)
             if distance > 70 && distance < cursorRadius { fx += dx / distance * 0.8; fy += dy / distance * 0.8 }
         }
-        if let t = target {
-            let dx = t.x - x, dy = t.y - y, distance = hypot(dx, dy)
-            if distance > 32 { fx += dx / distance * 2.4; fy += dy / distance * 2.4 }
-        }
+        // 食物：每尾认准离自己最近的一处，半途不轻易换食（除非另一处近了 25% 以上）；
+        // 离得越远冲得越猛，收近了贴进饲料群里啄食。
+        var dashing = false
+        var nearestDistance = Double.infinity
+        if !targets.isEmpty {
+            var nearest = targets[0]
+            for spot in targets {
+                let d = hypot(spot.x - x, spot.y - y)
+                if d < nearestDistance { nearestDistance = d; nearest = spot }
+            }
+            if hasMeal {
+                for spot in targets where hypot(spot.x - meal.x, spot.y - meal.y) < 1 {
+                    let d = hypot(spot.x - x, spot.y - y)
+                    if d < nearestDistance * 1.25 { nearest = spot; nearestDistance = d }
+                    break
+                }
+            }
+            meal = nearest; hasMeal = true
+            if nearestDistance > 16 {
+                let urgency = nearestDistance > 110 ? 4.5 : 3.2
+                let dx = nearest.x - x, dy = nearest.y - y
+                fx += dx / nearestDistance * urgency; fy += dy / nearestDistance * urgency
+                dashing = nearestDistance > 60
+            }
+        } else { hasMeal = false }
         desired = atan2(fy, fx)
         let delta = atan2(sin(desired - angle), cos(desired - angle))
-        // 受惊时急转急游，平时转向平缓。
+        // 受惊时急转急游，抢食时利落转向，平时平缓。
         let panicking = startledUntil > time
-        turn += (clamp(delta * (panicking ? 3.4 : 1.9), panicking ? -2.2 : -1.05, panicking ? 2.2 : 1.05) - turn) * min(1, dt * (panicking ? 6 : 3))
+        let gain = panicking ? 3.4 : dashing ? 3.0 : 1.9
+        let turnLimit = panicking ? 2.2 : dashing ? 2.0 : 1.05
+        turn += (clamp(delta * gain, -turnLimit, turnLimit) - turn) * min(1, dt * (panicking ? 6 : dashing ? 5.5 : 3))
         angle += turn * dt
-        let velocity = cruise * speed * (panicking ? 2.3 : 1) * (1 + 0.12 * sin(time * 1.1 + phase))
+        // 受惊先猛地弹开，1.4 秒内收势；抢食冲刺随距离收速。
+        var boost = 1.0
+        if panicking {
+            let left = clamp((startledUntil - time) / 1.4, 0, 1)
+            boost = 1 + 6 * left * left
+        } else if dashing {
+            boost = 1 + 2.2 * clamp((nearestDistance - 60) / 180, 0, 1)
+        }
+        let velocity = cruise * speed * boost * (1 + 0.12 * sin(time * 1.1 + phase))
         x = clamp(x + cos(angle) * velocity * dt, 28, max(28, width - 28))
         y = clamp(y + sin(angle) * velocity * dt, 28, max(28, height - 28))
     }
@@ -131,7 +166,8 @@ final class PondScene: SKScene {
     let water = PondWater()
     var lastTime: TimeInterval = 0, simulationTime: Double = 0
     var wakeClock = 0.0, wakeIndex = 0
-    var foodTarget: CGPoint?, foodExpiry: Double = 0
+    struct FoodSpot { var position: CGPoint, expiry: Double }
+    var foodSpots: [FoodSpot] = []
     var allowsFeeding = false
     var cursor: CursorProbe?
     var rng = SeededRandom()
@@ -154,7 +190,9 @@ final class PondScene: SKScene {
         if configuredSize != world {
             if configuredSize.width > 0 && configuredSize.height > 0 {
                 for i in swimmers.indices { swimmers[i].x *= world.width / configuredSize.width; swimmers[i].y *= world.height / configuredSize.height }
-                if let target = foodTarget { foodTarget = CGPoint(x: target.x * world.width / configuredSize.width, y: target.y * world.height / configuredSize.height) }
+                for i in foodSpots.indices {
+                    foodSpots[i].position = CGPoint(x: foodSpots[i].position.x * world.width / configuredSize.width, y: foodSpots[i].position.y * world.height / configuredSize.height)
+                }
             }
             pondCamera.position = CGPoint(x: world.width / 2, y: world.height / 2); pondCamera.setScale(preferences.distance)
             configuredSize = world
@@ -233,14 +271,14 @@ final class PondScene: SKScene {
     func startle(near point: CGPoint) {
         let radius = min(worldSize.width, worldSize.height) * 0.28
         for i in swimmers.indices where hypot(swimmers[i].x - point.x, swimmers[i].y - point.y) < radius {
-            swimmers[i].startledUntil = simulationTime + 1.1; swimmers[i].startledFrom = point
+            swimmers[i].startledUntil = simulationTime + 1.4; swimmers[i].startledFrom = point
         }
     }
     func feed(at point: CGPoint? = nil) {
-        foodLayer.removeAllChildren()
-        foodTarget = point ?? CGPoint(x: rng.range(worldSize.width * 0.25, worldSize.width * 0.75), y: rng.range(worldSize.height * 0.25, worldSize.height * 0.75))
-        foodExpiry = simulationTime + 16
-        guard let center = foodTarget else { return }
+        // 多处投喂并存：新饲料不清除旧饲料，鱼群各自扑向最近一处；最多保留 5 处，再投替换最早的。
+        let center = point ?? CGPoint(x: rng.range(worldSize.width * 0.25, worldSize.width * 0.75), y: rng.range(worldSize.height * 0.25, worldSize.height * 0.75))
+        foodSpots.append(FoodSpot(position: center, expiry: simulationTime + 16))
+        if foodSpots.count > 5 { foodSpots.removeFirst() }
         for _ in 0..<16 {
             let crumb = ellipse(CGRect(x: -2, y: -2, width: 4, height: 4), color(0xE7CAA0), stroke: color(0x94724B), width: 0.5)
             crumb.position = CGPoint(x: center.x + rng.range(-24, 24), y: center.y + rng.range(-24, 24)); foodLayer.addChild(crumb)
@@ -262,7 +300,7 @@ final class PondScene: SKScene {
         lastTime = currentTime; simulationTime += dt
         water.update(time: simulationTime)
         animatePlants()
-        if simulationTime > foodExpiry { foodTarget = nil }
+        foodSpots.removeAll { simulationTime > $0.expiry }
         // 光标互动：6 秒内的光标还算“在场”；静止或缓动的光标让附近金鱼好奇，急挥则已被上层惊散。
         var cursorPoint: CGPoint? = nil, curious = false
         if preferences.interact, let probe = cursor {
@@ -277,7 +315,7 @@ final class PondScene: SKScene {
         for i in swimmers.indices {
             var near: [CGPoint] = []
             for j in positions.indices where j != i { near.append(positions[j]) }
-            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, target: foodTarget, neighbours: near, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
+            swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, targets: foodSpots.map { $0.position }, neighbours: near, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
         }
         // 浅水中的鱼偶尔带动水面，保持稀疏尾波，避免每条鱼都画出一圈圈靶心。
@@ -360,16 +398,25 @@ struct SettingsView: View {
                 divider
                 Toggle("显示在桌面", isOn: $preferences.enabled).toggleStyle(.switch)
                 Toggle("鼠标互动 · 涟漪与投喂", isOn: $preferences.interact).toggleStyle(.switch)
+                HStack {
+                    Text("投喂修饰键").frame(minWidth: 64, alignment: .leading)
+                    Spacer()
+                    Picker("投喂修饰键", selection: $preferences.feedModifier) {
+                        ForEach(feedModifierChoices, id: \.key) { choice in
+                            Text(choice.symbol).tag(choice.key)
+                        }
+                    }.labelsHidden().pickerStyle(.segmented).frame(width: 140)
+                }
                 Toggle("菜单栏融合 · 池塘壁纸", isOn: $preferences.harmony).toggleStyle(.switch)
                 Toggle("节能模式 · 20 帧", isOn: $preferences.lowPower).toggleStyle(.switch)
-                Text("桌面图标照常使用，设置自动保存。鼠标缓缓拂过水面泛起涟漪，附近的金鱼会好奇靠近；在桌面空白处轻点即可投喂，快速挥动会惊散鱼群。菜单栏融合会临时使用池塘壁纸，切回桌面时直接显示池塘，关闭或退出时恢复原图。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+                Text("桌面图标照常使用，设置自动保存。鼠标缓缓拂过水面泛起涟漪，附近的金鱼会好奇靠近；按住 \(feedModifierName(preferences.feedModifier)) 轻点桌面空白处才投喂，普通点击不触发，快速挥动会惊散鱼群。菜单栏融合会临时使用池塘壁纸，切回桌面时直接显示池塘，关闭或退出时恢复原图。").font(.system(size: 10)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button(action: feed) { Label("投喂", systemImage: "circle.dotted").frame(maxWidth: .infinity) }
                     Button { preferences.paused.toggle() } label: { Label(preferences.paused ? "继续" : "暂停", systemImage: preferences.paused ? "play" : "pause").frame(maxWidth: .infinity) }
                 }.buttonStyle(.bordered).controlSize(.large)
                 HStack {
                     if compact { Button("打开池塘预览", action: preview).buttonStyle(.plain) }
-                    else { Text("点击水面或桌面空白处投喂。").foregroundStyle(muted) }
+                    else { Text("点击水面投喂；桌面需按住 \(feedModifierName(preferences.feedModifier)) 轻点空白处。").foregroundStyle(muted) }
                     Spacer(); Button("退出", action: quit).buttonStyle(.plain).foregroundStyle(muted)
                 }.font(.system(size: 11))
             }.font(.system(size: 12)).padding(24)
@@ -627,11 +674,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let points = school.map { CGPoint(x: $0.x, y: $0.y) }
                     for i in school.indices {
                         let target = frame > 900 ? CGPoint(x: dimensions.0 / 2, y: dimensions.1 / 2) : nil
-                        school[i].step(dt: 1.0 / 30, time: Double(frame) / 30, width: dimensions.0, height: dimensions.1, speed: speed, target: target, neighbours: Array(points.enumerated().filter { $0.offset != i }.map { $0.element }))
+                        school[i].step(dt: 1.0 / 30, time: Double(frame) / 30, width: dimensions.0, height: dimensions.1, speed: speed, targets: target.map { [$0] } ?? [], neighbours: Array(points.enumerated().filter { $0.offset != i }.map { $0.element }))
                         let fish = school[i]
                         precondition(fish.x.isFinite && fish.y.isFinite && fish.angle.isFinite, "鱼群状态必须为有限数")
                         precondition(fish.x >= 28 && fish.x <= dimensions.0 - 28 && fish.y >= 28 && fish.y <= dimensions.1 - 28, "金鱼不能越过边界")
-                        precondition(abs(fish.turn) <= 1.05, "转向不能突变")
+                        precondition(abs(fish.turn) <= 2.2, "转向不能超过受惊档上限")
                     }
                 }
             }
@@ -643,7 +690,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let before = scene.simulationTime; preferences.paused = true; scene.update(3)
         precondition(scene.simulationTime == before)
         preferences.paused = false; scene.update(99); precondition(scene.simulationTime == before)
-        scene.feed(at: CGPoint(x: 500, y: 400)); precondition(scene.foodTarget == CGPoint(x: 500, y: 400))
+        scene.feed(at: CGPoint(x: 500, y: 400))
+        precondition(scene.foodSpots.last?.position == CGPoint(x: 500, y: 400), "投喂必须落在指定位置")
+        scene.feed(at: CGPoint(x: 700, y: 400))
+        precondition(scene.foodSpots.count == 2, "多处投喂必须并存，新饲料不能清除旧饲料")
         runDesignChecks(preferences: preferences)
         print("通过：60 尾金鱼 × 3 档速度 × 3 种屏幕尺寸，连续模拟 60 秒；边界、转向、投喂、暂停及恢复均正常。")
         NSApp.terminate(nil)

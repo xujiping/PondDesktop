@@ -57,6 +57,24 @@ struct ScreenWindow {
     let frame: NSRect  // 全局坐标（左下原点）
 }
 
+// 投喂修饰键：按住它轻点桌面空白处才投喂，普通点击完全不触发，
+// 避免桌面的框选、多选等系统操作被顺带激活。
+let feedModifierChoices: [(key: String, symbol: String)] = [("option", "⌥"), ("control", "⌃"), ("shift", "⇧"), ("command", "⌘")]
+func feedModifierFlag(_ key: String) -> NSEvent.ModifierFlags {
+    switch key {
+    case "control": return .control
+    case "shift": return .shift
+    case "command": return .command
+    default: return .option
+    }
+}
+func feedModifierName(_ key: String) -> String {
+    feedModifierChoices.first { $0.key == key }?.symbol ?? "⌥"
+}
+func feedModifierActive(_ flags: NSEvent.ModifierFlags, key: String) -> Bool {
+    flags.contains(feedModifierFlag(key))
+}
+
 // 桌面空白处的判定：点击必须落在所有普通图层窗口（应用窗口、程序坞、菜单栏）之外。
 // 桌面图标与壁纸位于桌面层级（layer < 0），不参与遮挡。
 func isDesktopTap(_ point: NSPoint, windows: [ScreenWindow]) -> Bool {
@@ -88,7 +106,7 @@ extension AppDelegate {
                 else { scene.cursor = nil }
             }
         case .leftMouseDown:
-            if desktopTapQualifies(at: p) { stream.pressed(to: p, at: event.timestamp) }
+            if feedModifierActive(event.modifierFlags, key: preferences.feedModifier), desktopTapQualifies(at: p) { stream.pressed(to: p, at: event.timestamp) }
         case .leftMouseUp:
             if let tap = stream.released(at: event.timestamp), let (scene, world) = desktopHit(tap) { scene.feed(at: world) }
         default: break
@@ -103,19 +121,27 @@ extension AppDelegate {
         return nil
     }
 
-    // 前台是访达（或弹出设置时的本应用）且点击落在所有普通窗口之外，才算点在桌面上。
+    // 点击落在所有可交互的普通窗口（应用窗口、程序坞、菜单栏）之外，就是桌面空点。
+    // 桌面图标与壁纸位于桌面层级（layer < 0），不参与遮挡。
+    // 程序坞有一块铺满整屏、忽略鼠标的背景窗口，点击会穿透到桌面，必须排除，
+    // 否则屏幕上任何位置都判不成桌面。
     func desktopTapQualifies(at p: NSPoint) -> Bool {
-        guard let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-              front == "com.apple.finder" || front == Bundle.main.bundleIdentifier else { return false }
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
         let flip = NSScreen.screens.first?.frame.maxY ?? 0  // CG 窗口坐标以上左为原点，需翻转到 AppKit 坐标
-        let windows: [ScreenWindow] = list.compactMap { info in
+        let screenArea = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.screens.first)?.frame
+            ?? NSRect(origin: .zero, size: .zero)
+        var windows: [ScreenWindow] = []
+        for info in list {
             guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
                   let x = bounds["X"] as? Double, let y = bounds["Y"] as? Double,
-                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double else { return nil }
-            return ScreenWindow(owner: info[kCGWindowOwnerName as String] as? String ?? "", layer: layer,
-                                frame: NSRect(x: x, y: flip - y - h, width: w, height: h))
+                  let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double else { continue }
+            let frame = NSRect(x: x, y: flip - y - h, width: w, height: h)
+            if let pid = info[kCGWindowOwnerPID as String] as? Int32,
+               NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.dock",
+               frame.width * frame.height > screenArea.width * screenArea.height * 0.98 { continue }
+            windows.append(ScreenWindow(owner: info[kCGWindowOwnerName as String] as? String ?? "", layer: layer,
+                                        frame: frame))
         }
         return isDesktopTap(p, windows: windows)
     }

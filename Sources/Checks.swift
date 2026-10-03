@@ -121,7 +121,7 @@ func runDesignChecks(preferences: Preferences) {
     precondition(abs(scene.pondCamera.xScale - 2.4) < 0.0001)
     precondition(scene.worldSize.width == 2160 && scene.worldSize.height == 1440)
     precondition(scene.swimmers.allSatisfy { $0.x >= 0 && $0.x <= scene.worldSize.width && $0.y >= 0 && $0.y <= scene.worldSize.height }, "拉远视野不能把鱼移出池塘")
-    precondition(abs(scene.foodTarget!.x - scene.worldSize.width * 0.5) < 0.001, "调整视野时投喂位置必须随池塘缩放")
+    precondition(abs(scene.foodSpots[0].position.x - scene.worldSize.width * 0.5) < 0.001, "调整视野时投喂位置必须随池塘缩放")
     runVegetationChecks()
     runInteractionChecks(preferences: preferences)
     runWaterChecks(preferences: preferences)
@@ -182,7 +182,8 @@ func runWaterChecks(preferences: Preferences) {
                                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
     scene.mouseDown(with: tap)
     let expected = scene.worldPoint(fromView: location)
-    precondition(hypot(scene.foodTarget!.x - expected.x, scene.foodTarget!.y - expected.y) < 0.01,
+    let spot = scene.foodSpots.last!
+    precondition(hypot(spot.position.x - expected.x, spot.position.y - expected.y) < 0.01,
                  "预览点击只能做一次相机换算，投喂与水波必须落在光标位置")
     let old = scene.simulationTime
     preferences.paused = true; scene.update(100); scene.update(101)
@@ -286,6 +287,9 @@ func runInteractionChecks(preferences: Preferences) {
     precondition(!isDesktopTap(NSPoint(x: 250, y: 250), windows: windows), "应用窗口内的点击不算桌面")
     precondition(!isDesktopTap(NSPoint(x: 500, y: 40), windows: windows), "程序坞上的点击不算桌面")
     precondition(isDesktopTap(NSPoint(x: 600, y: 500), windows: windows), "桌面图标所在的桌面层级不应拦截投喂")
+    precondition(feedModifierFlag("option") == .option && feedModifierFlag("command") == .command && feedModifierName("shift") == "⇧", "投喂修饰键的映射与显示名必须正确")
+    precondition(feedModifierActive([.option, .command], key: "option"), "按住投喂修饰键的轻点才应投喂")
+    precondition(!feedModifierActive([.capsLock], key: "option"), "未按修饰键的普通点击不应投喂")
     preferences.distance = 2.4; preferences.interact = true
     let scene = PondScene(size: CGSize(width: 900, height: 600), preferences: preferences)
     scene.configure()

@@ -1,15 +1,26 @@
 #!/bin/zsh
 set -euo pipefail
 PROJECT_DIR="${0:A:h}"
+DEV=false
+if [[ "${1:-}" == "--dev" ]]; then
+    DEV=true; shift
+fi
 OUTPUT_DIR="${1:-$PROJECT_DIR/build}"
 APP_DIR="$OUTPUT_DIR/一池.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 BUILD_DIR="$PROJECT_DIR/.build"
 mkdir -p "$BUILD_DIR"
-for ARCH in arm64 x86_64; do
+# --dev 只编译本机架构并跳过 lipo，用于日常开发迭代；发布仍用双架构全量构建。
+ARCHES=(arm64 x86_64)
+if $DEV; then ARCHES=($(uname -m)); fi
+for ARCH in $ARCHES; do
     xcrun swiftc -O -target "$ARCH-apple-macosx13.0" -framework AppKit -framework SpriteKit -framework SwiftUI -framework Combine "$PROJECT_DIR/Sources/"*.swift -o "$BUILD_DIR/PondDesktop-$ARCH"
 done
-xcrun lipo -create "$BUILD_DIR/PondDesktop-arm64" "$BUILD_DIR/PondDesktop-x86_64" -output "$APP_DIR/Contents/MacOS/PondDesktop"
+if [[ ${#ARCHES} -eq 2 ]]; then
+    xcrun lipo -create "$BUILD_DIR/PondDesktop-arm64" "$BUILD_DIR/PondDesktop-x86_64" -output "$APP_DIR/Contents/MacOS/PondDesktop"
+else
+    cp "$BUILD_DIR/PondDesktop-${ARCHES[1]}" "$APP_DIR/Contents/MacOS/PondDesktop"
+fi
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -30,4 +41,4 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 PLIST
 if [[ -f "$PROJECT_DIR/AppIcon.icns" ]]; then cp "$PROJECT_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"; fi
 codesign --force --sign - "$APP_DIR"
-print "已构建：$APP_DIR"
+if $DEV; then print "已构建（${ARCHES[1]} 单架构）：$APP_DIR"; else print "已构建：$APP_DIR"; fi

@@ -189,7 +189,20 @@ func runWaterChecks(preferences: Preferences) {
     preferences.paused = true; scene.update(100); scene.update(101)
     precondition(scene.simulationTime == old, "暂停时水波和水面必须一起停止")
     preferences.paused = false
-    print("通过：水面着色器真实像素变化、大范围涟漪、连续互动节点上限、消散清理、减少动态效果与暂停。")
+    // 与水面无关的设置变更走 configure 时，进行中的涟漪和反光节点必须原样保留。
+    scene.water.addRipple(at: center, time: 30)
+    let ripplesBefore = scene.water.ripples.count
+    let glintSprites = scene.water.glints.map { $0.sprite }
+    scene.configure()
+    precondition(scene.water.ripples.count == ripplesBefore, "非水面相关的设置变更不能清掉进行中的涟漪")
+    precondition(scene.water.glints.map { $0.sprite } == glintSprites, "反光节点必须跨 configure 复用，不能随无关设置重建")
+    // 视野变化必须真正重建水面，清理旧坐标里的波纹。
+    let originalDistance = preferences.distance
+    preferences.distance = 1.0; scene.configure()
+    precondition(scene.water.ripples.isEmpty, "视野变化必须清理旧坐标的波纹")
+    precondition(scene.water.glints.map { $0.sprite } != glintSprites, "视野变化必须重建水面")
+    preferences.distance = originalDistance; scene.configure()
+    print("通过：水面着色器真实像素变化、大范围涟漪、连续互动节点上限、消散清理、减少动态效果、暂停，以及无关设置保留涟漪、视野变化重建水面。")
 }
 
 func runPlantMotionChecks(preferences: Preferences) {

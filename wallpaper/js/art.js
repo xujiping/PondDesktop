@@ -11,6 +11,7 @@ function bake(bounds, scale, draw) {
   const h = Math.max(1, Math.ceil(bounds.h * scale));
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
+  tagTexture(canvas);
   const ctx = canvas.getContext('2d');
   ctx.translate(0, h); ctx.scale(scale, -scale);   // 翻到 Y-up
   ctx.translate(-bounds.x, -bounds.y);

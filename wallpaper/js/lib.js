@@ -18,6 +18,7 @@ class SeededRandom {
 }
 
 function hexToRgb(hex) { return [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255]; }
+function lum(hex) { const [r, g, b] = hexToRgb(hex); return 0.2126 * r + 0.7152 * g + 0.0722 * b; }
 function rgbCss(hex, alpha = 1) {
   const [r, g, b] = hexToRgb(hex);
   return alpha >= 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
@@ -39,13 +40,23 @@ const DAYLIGHTS = {
   night: { key: 'night', name: '晚上', tint: 0x14304A, strength: 0.42, dim: 0.34, glow: 0xAFC6E8, glowAlpha: 0.5,  glintBlend: 0.5 },
 };
 
-function effectiveDaylight(mode, date = new Date()) {
+function effectiveDaylight(mode, date = now()) {
   if (mode !== 'auto' && DAYLIGHTS[mode]) return DAYLIGHTS[mode];
   const hour = date.getHours();
   if (hour >= 4 && hour < 11) return DAYLIGHTS.dawn;
   if (hour >= 11 && hour < 17) return DAYLIGHTS.noon;
   if (hour >= 17 && hour < 20) return DAYLIGHTS.dusk;
   return DAYLIGHTS.night;
+}
+
+// 测试钩子：?clock=23 可把“当前时间”固定到某小时，验证自动时段切换。
+let clockHourOverride = null;
+function setClockHour(hour) { clockHourOverride = hour; }
+function now() {
+  if (clockHourOverride === null) return new Date();
+  const date = new Date();
+  date.setHours(clockHourOverride, 0, 0, 0);
+  return date;
 }
 
 // 先压暗再上时段色。

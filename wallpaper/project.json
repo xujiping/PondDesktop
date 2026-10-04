@@ -1,0 +1,97 @@
+{
+  "title": "一池 · Yichi Pond",
+  "type": "web",
+  "file": "index.html",
+  "visibility": "private",
+  "description": "原生 macOS 动态桌面「一池」的网页版：一池金鱼自在游弋，池底卵石、浮叶睡莲与水面涟漪全部程序化绘制，无任何图片资源。支持时间光线（凌晨/中午/傍晚/晚上）、三款水色主题、鼠标涟漪/惊散/修饰键投喂。壁纸由 Canvas 渲染，仅 30 帧，全屏应用时由 Wallpaper Engine 自动暂停。",
+  "tags": ["Nature", "Animal", "Game"],
+  "general": {
+    "supportsMultiMonitor": true,
+    "properties": {
+      "waterTheme": {
+        "order": 1,
+        "text": "水色主题",
+        "type": "combo",
+        "value": "jade",
+        "options": [
+          { "label": "青池", "value": "jade" },
+          { "label": "墨池", "value": "ink" },
+          { "label": "晴池", "value": "blue" }
+        ]
+      },
+      "fishCount": {
+        "order": 2,
+        "text": "金鱼数量",
+        "type": "slider",
+        "value": 24,
+        "min": 6,
+        "max": 60,
+        "step": 1
+      },
+      "swimSpeed": {
+        "order": 3,
+        "text": "游动速度",
+        "type": "slider",
+        "value": 0.8,
+        "min": 0.3,
+        "max": 1.8,
+        "step": 0.05
+      },
+      "viewDistance": {
+        "order": 4,
+        "text": "视野远近",
+        "type": "slider",
+        "value": 1.65,
+        "min": 1.0,
+        "max": 2.4,
+        "step": 0.05
+      },
+      "plantDensity": {
+        "order": 5,
+        "text": "植物丰茂度",
+        "type": "slider",
+        "value": 1.15,
+        "min": 0.5,
+        "max": 1.8,
+        "step": 0.05
+      },
+      "daylightMode": {
+        "order": 6,
+        "text": "时间光线",
+        "type": "combo",
+        "value": "auto",
+        "options": [
+          { "label": "自动", "value": "auto" },
+          { "label": "凌晨", "value": "dawn" },
+          { "label": "中午", "value": "noon" },
+          { "label": "傍晚", "value": "dusk" },
+          { "label": "晚上", "value": "night" }
+        ]
+      },
+      "mouseInteraction": {
+        "order": 7,
+        "text": "鼠标互动 · 涟漪与惊散",
+        "type": "bool",
+        "value": true
+      },
+      "feedMode": {
+        "order": 8,
+        "text": "投喂方式（轻点桌面空白处）",
+        "type": "combo",
+        "value": "alt",
+        "options": [
+          { "label": "Alt + 轻点", "value": "alt" },
+          { "label": "Ctrl + 轻点", "value": "ctrl" },
+          { "label": "Shift + 轻点", "value": "shift" },
+          { "label": "直接轻点", "value": "none" }
+        ]
+      },
+      "lowPower": {
+        "order": 9,
+        "text": "节能模式 · 20 帧",
+        "type": "bool",
+        "value": false
+      }
+    }
+  }
+}

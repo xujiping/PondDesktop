@@ -37,6 +37,54 @@ func runWallpaperChecks() {
     print("通过：提前生成池塘壁纸、屏幕比例、相机位置与缩放、不透明池水底色、高清 PNG 和双文件复用；未修改系统壁纸。")
 }
 
+func runVisitorChecks(preferences: Preferences) {
+    let scene = PondScene(size: CGSize(width: 900, height: 600), preferences: preferences)
+    scene.update(1); scene.update(2)
+    precondition(scene.flowerSpots.count >= 1, "默认植被必须给蝴蝶留花")
+    // 蝴蝶：飞进池塘、落在花上悬停、离场；全程贴图齐全、坐标有限。
+    scene.visitors.spawn(time: scene.simulationTime, width: scene.worldSize.width, height: scene.worldSize.height,
+                         flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .butterfly)
+    guard let butterfly = scene.visitors.visitor else { preconditionFailure("蝴蝶必须立刻生成") }
+    precondition(butterfly.node.children.count == 3 && scene.visitorLayer.children.count == 2, "蝴蝶必须挂上双翅与身体贴图，并附带影子")
+    var hovered = false, departed = false
+    for frame in 0..<2400 {
+        scene.update(Double(frame) / 30 + 20)
+        if let visit = scene.visitors.visitor {
+            let brain = visit.brain
+            precondition(brain.x.isFinite && brain.y.isFinite && brain.angle.isFinite, "蝴蝶状态必须为有限数")
+            precondition(brain.x > -120 && brain.x < scene.worldSize.width + 120 && brain.y > -120 && brain.y < scene.worldSize.height + 120, "蝴蝶只能在池塘附近的空域活动")
+            if brain.stage == .hovering { hovered = true }
+        } else { departed = true; break }
+    }
+    precondition(hovered, "蝴蝶必须飞到花上悬停")
+    precondition(departed, "蝴蝶到访结束后必须离场")
+    precondition(scene.visitors.nextVisit > scene.simulationTime, "离场后必须排期下次到访")
+    // 燕子：掠过全池即走。
+    scene.visitors.spawn(time: scene.simulationTime, width: scene.worldSize.width, height: scene.worldSize.height,
+                         flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .bird)
+    var frames = 0
+    while let visit = scene.visitors.visitor {
+        scene.update(Double(frames) / 30 + 200)
+        frames += 1
+        precondition(frames < 1500, "燕子必须在几秒内掠过池塘")
+        precondition(visit.brain.x.isFinite && visit.brain.y.isFinite, "燕子状态必须为有限数")
+    }
+    precondition(frames > 30, "燕子掠过必须可见一段时间，不能一帧即穿")
+    // 夜晚不迎客。
+    preferences.daylightMode = "night"; scene.configure()
+    scene.visitors.nextVisit = 0
+    for frame in 0..<600 { scene.update(Double(frame) / 30 + 400); precondition(scene.visitors.visitor == nil, "夜晚蝴蝶与燕子都不出门") }
+    // 开关清场。
+    preferences.daylightMode = "noon"; scene.configure()
+    scene.visitors.spawn(time: scene.simulationTime, width: scene.worldSize.width, height: scene.worldSize.height,
+                         flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .butterfly)
+    precondition(scene.visitors.visitor != nil)
+    preferences.visitors = false; scene.configure()
+    precondition(scene.visitors.visitor == nil && scene.visitorLayer.children.isEmpty, "关闭访客必须整体清场")
+    preferences.visitors = true; scene.configure()
+    print("通过：蝴蝶寻花悬停与离场、燕子贴水掠过、夜晚歇访、开关清场与贴图挂载。")
+}
+
 func runDesktopPresentationChecks(preferences: Preferences) {
     let size = CGSize(width: 640, height: 400)
     let window = DesktopWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: .borderless, backing: .buffered, defer: false)
@@ -135,6 +183,7 @@ func runDesignChecks(preferences: Preferences) {
     runDaylightChecks(preferences: preferences)
     runPlantMotionChecks(preferences: preferences)
     runCritterChecks(preferences: preferences)
+    runVisitorChecks(preferences: preferences)
     runDesktopPresentationChecks(preferences: preferences)
     print("通过：单尾颜色/大小/笔画持久化、鱼身裁切、橡皮底色恢复、撤销重做、鱼群纹理更新、相机缩放和零尺寸窗口保护。")
 }

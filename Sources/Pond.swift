@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.6.0"
+let appVersion = "1.7.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -31,6 +31,7 @@ final class Preferences: ObservableObject {
     @Published var feedModifier: String { didSet { save() } }
     @Published var daylightMode: String { didSet { save() } }
     @Published var critters: Bool { didSet { save() } }
+    @Published var visitors: Bool { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { designData = nil; save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -53,6 +54,7 @@ final class Preferences: ObservableObject {
         let savedDaylight = d.string(forKey: "daylightMode") ?? "auto"
         daylightMode = savedDaylight == "auto" || Daylight.all[savedDaylight] != nil ? savedDaylight : "auto"
         critters = d.object(forKey: "pondCritters") == nil ? true : d.bool(forKey: "pondCritters")
+        visitors = d.object(forKey: "pondVisitors") == nil ? true : d.bool(forKey: "pondVisitors")
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -69,6 +71,7 @@ final class Preferences: ObservableObject {
         d.set(feedModifier, forKey: "feedModifier")
         d.set(daylightMode, forKey: "daylightMode")
         d.set(critters, forKey: "pondCritters")
+        d.set(visitors, forKey: "pondVisitors")
         if designData == nil { designData = try? JSONEncoder().encode(designs) }
         if let data = designData { d.set(data, forKey: "fishDesigns") }
         onChange?()
@@ -171,8 +174,10 @@ struct SeededRandom {
 final class PondScene: SKScene {
     let preferences: Preferences
     var swimmers: [Swimmer] = [], fishNodes: [FishNode] = []
-    let floor = SKNode(), critterLayer = SKNode(), inhabitants = SKNode(), surface = SKNode(), plants = SKNode(), foodLayer = SKNode()
+    let floor = SKNode(), critterLayer = SKNode(), inhabitants = SKNode(), surface = SKNode(), visitorLayer = SKNode(), plants = SKNode(), foodLayer = SKNode()
     let critters = PondCritters()
+    let visitors = PondVisitors()
+    var flowerSpots: [CGPoint] = []
     let pondCamera = SKCameraNode()
     var worldSize: CGSize { CGSize(width: size.width * preferences.distance, height: size.height * preferences.distance) }
     var configuredSize = CGSize.zero
@@ -194,8 +199,8 @@ final class PondScene: SKScene {
         self.preferences = preferences
         super.init(size: size)
         scaleMode = .resizeFill
-        addChild(floor); addChild(critterLayer); addChild(inhabitants); addChild(surface); addChild(foodLayer); addChild(pondCamera); camera = pondCamera
-        floor.zPosition = -10; critterLayer.zPosition = -5; inhabitants.zPosition = 0; surface.zPosition = 10; foodLayer.zPosition = 12
+        addChild(floor); addChild(critterLayer); addChild(inhabitants); addChild(surface); addChild(visitorLayer); addChild(foodLayer); addChild(pondCamera); camera = pondCamera
+        floor.zPosition = -10; critterLayer.zPosition = -5; inhabitants.zPosition = 0; surface.zPosition = 10; visitorLayer.zPosition = 11; foodLayer.zPosition = 12
         configure()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -216,6 +221,7 @@ final class PondScene: SKScene {
                     foodSpots[i].position = CGPoint(x: foodSpots[i].position.x * xRatio, y: foodSpots[i].position.y * yRatio)
                 }
                 critters.rescale(xRatio: xRatio, yRatio: yRatio)
+                visitors.rescale(xRatio: xRatio, yRatio: yRatio)
             }
             pondCamera.position = CGPoint(x: world.width / 2, y: world.height / 2); pondCamera.setScale(preferences.distance)
             configuredSize = world
@@ -262,6 +268,11 @@ final class PondScene: SKScene {
         } else {
             critters.remove()
         }
+        if preferences.visitors {
+            visitors.applyDaylight(daylight)
+        } else {
+            visitors.remove()
+        }
         view?.preferredFramesPerSecond = preferences.lowPower ? 20 : 30
         isPaused = preferences.paused; lastTime = 0
     }
@@ -275,6 +286,7 @@ final class PondScene: SKScene {
         if plants.parent == nil { surface.addChild(plants) }
         let palette = Palette(theme: preferences.theme, daylight: daylight)
         let artwork = PondEnvironment.make(size: worldSize, density: preferences.vegetation, palette: palette, daylight: daylight, rasterScale: rasterScale)
+        flowerSpots = artwork.vegetation.filter { $0.kind == .flower }.map { $0.position }
         let bed = SKSpriteNode(texture: SKTexture(cgImage: artwork.bed), size: worldSize)
         bed.position = CGPoint(x: worldSize.width / 2, y: worldSize.height / 2); bed.zPosition = -1; floor.addChild(bed)
         bedSprite = bed
@@ -361,6 +373,9 @@ final class PondScene: SKScene {
                         speed: preferences.speed, targets: targets, reducedMotion: water.reducedMotion) { point in
             water.addRipple(at: point, time: simulationTime, strength: 0.3, radius: 95)
         }
+        // 蝴蝶与燕子偶然到访；本体飞在浮叶之上，影子落进同一层。
+        visitors.update(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height,
+                        daylight: daylight, flowers: flowerSpots, layer: visitorLayer)
         // 浅水中的鱼偶尔带动水面，保持稀疏尾波，避免每条鱼都画出一圈圈靶心。
         wakeClock += dt
         if !water.reducedMotion, wakeClock > 2.4, !swimmers.isEmpty {
@@ -435,6 +450,7 @@ struct SettingsView: View {
                 }
                 Button(action: edit) { Label("金鱼画室 · 颜色与花纹", systemImage: "paintbrush.pointed").frame(maxWidth: .infinity) }.buttonStyle(.bordered).controlSize(.large)
                 Toggle("小乌龟与小邻居 · 龟、蝌蚪、田螺", isOn: $preferences.critters).toggleStyle(.switch)
+                Toggle("蝴蝶与飞鸟 · 偶然到访", isOn: $preferences.visitors).toggleStyle(.switch)
                 divider
                 sectionLabel("一汪池水")
                 HStack(spacing: 10) { themeButton("jade", "青池", 0x385E50); themeButton("ink", "墨池", 0x173D40); themeButton("blue", "晴池", 0x3B727C) }
@@ -552,7 +568,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let daylight = CommandLine.arguments.firstIndex(of: "--daylight").flatMap { offset in
                 CommandLine.arguments.count > offset + 1 ? Daylight.all[CommandLine.arguments[offset + 1]] : nil
             }
-            renderPreview(to: CommandLine.arguments[index + 1], daylight: daylight)
+            let wait = CommandLine.arguments.firstIndex(of: "--wait").flatMap { offset in
+                CommandLine.arguments.count > offset + 1 ? Double(CommandLine.arguments[offset + 1]) : nil
+            }
+            renderPreview(to: CommandLine.arguments[index + 1], daylight: daylight, wait: wait ?? 2)
             return
         }
         if let index = CommandLine.arguments.firstIndex(of: "--render-matrix"), CommandLine.arguments.count > index + 1 {
@@ -616,7 +635,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.target = self; button.action = #selector(togglePopover(_:)); button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         popover.behavior = .transient
-        popover.contentSize = CGSize(width: 340, height: 814)
+        popover.contentSize = CGSize(width: 340, height: 846)
         popover.contentViewController = NSHostingController(rootView: SettingsView(preferences: preferences, compact: true, feed: { [weak self] in self?.feedAll() }, preview: { [weak self] in self?.popover.close(); self?.showPreview() }, quit: { NSApp.terminate(nil) }, edit: { [weak self] in self?.popover.close(); self?.showEditor() }))
     }
     @objc func togglePopover(_ sender: Any?) {
@@ -748,14 +767,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editorState?.flush(); closeDesktop()
         if !rendering { WallpaperSync.restore(defaults: preferences.defaults) }
     }
-    func renderPreview(to output: String, daylight: Daylight? = nil) {
+    func renderPreview(to output: String, daylight: Daylight? = nil, wait: TimeInterval = 2) {
         NSApp.setActivationPolicy(.accessory)
         let scene = PondScene(size: CGSize(width: 1440, height: 900), preferences: preferences)
         scene.daylightOverride = daylight
         let window = PreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900), styleMask: .borderless, backing: .buffered, defer: false)
         let view = SKView(frame: window.contentLayoutRect); view.presentScene(scene); window.contentView = view
         previewWindow = window; window.orderFront(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
             guard let image = WallpaperSync.snapshotImage(view: view, scene: scene), self.writePNG(image, to: URL(fileURLWithPath: output))
             else { print("无法生成预览"); exit(1) }
             print("预览已保存：\(output)"); NSApp.terminate(nil)

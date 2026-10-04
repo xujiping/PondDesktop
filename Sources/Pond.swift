@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.5.0"
+let appVersion = "1.6.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -377,6 +377,14 @@ final class DesktopWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
+// 桌面窗口只有在当前空间且未被完全遮挡（如全屏应用盖住）时才看得见；
+// 看不见的场景停止模拟与绘制，功耗归零，恢复可见立即续播。
+func desktopWindowVisible(_ window: NSWindow) -> Bool {
+    window.isOnActiveSpace && window.occlusionState.contains(.visible)
+}
+func systemPausedLikeUser(_ visible: Bool, systemSuspended: Bool, userPaused: Bool) -> Bool {
+    systemSuspended || userPaused || !visible
+}
 final class PreviewWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -553,9 +561,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         installMainMenu()
-        installCursorInteraction()
+        if preferences.interact { installCursorInteraction() }
         preferences.onChange = { [weak self] in self?.scheduleSettings() }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.rebuildDesktop() })
+        // 全屏应用盖住桌面或切到其他空间时，暂停该屏的池塘模拟，省下整套渲染功耗。
+        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in self?.updateRenderActivity() })
         let nc = NSWorkspace.shared.notificationCenter
         observers.append(nc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshDesktop()
@@ -570,8 +580,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             observers.append(nc.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.suspend(false) })
         }
         rebuildDesktop()
-        // 自动时段按本地时钟在边界切换：每分钟对表一次，唤醒后的刷新在 suspend(false) 里做。
-        daylightTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.applySettings() }
+        updateRenderActivity()
+        // 自动时段按本地时钟在边界切换：每分钟对表一次；手动固定时段时空转跳过。
+        // 同一次对表顺带重估可见性：即使漏掉一次遮挡通知，下一分钟也会恢复播放。
+        daylightTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.updateRenderActivity()
+            guard self.preferences.daylightMode == "auto" else { return }
+            self.applySettings()
+        }
         let hasLaunched = UserDefaults.standard.bool(forKey: "hasLaunched")
         if !hasLaunched || CommandLine.arguments.contains("--preview") { showPreview() }
         UserDefaults.standard.set(true, forKey: "hasLaunched")
@@ -606,6 +623,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if popover.isShown { popover.performClose(sender) }
         else if let button = statusItem.button { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
     }
+    // 鼠标互动关闭时彻底卸载全局监听，不再随每次鼠标移动空跑。
+    func setCursorInteraction(_ enabled: Bool) {
+        if enabled && cursorMonitors.isEmpty {
+            installCursorInteraction()
+        } else if !enabled && !cursorMonitors.isEmpty {
+            for monitor in cursorMonitors { NSEvent.removeMonitor(monitor) }
+            cursorMonitors.removeAll()
+        }
+    }
     func scheduleSettings() {
         settingsWork?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.applySettings() }
@@ -614,9 +640,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applySettings() {
         if preferences.enabled && desktopWindows.isEmpty { rebuildDesktop() }
         if !preferences.enabled { closeDesktop() }
-        for scene in desktopScenes + (previewScene.map { [$0] } ?? []) { scene.configure(); if systemSuspended { scene.isPaused = true } }
+        for scene in desktopScenes + (previewScene.map { [$0] } ?? []) { scene.configure() }
+        setCursorInteraction(preferences.interact)
+        updateRenderActivity()
         for window in desktopWindows { (window.contentView as? DesktopPondView)?.updateBackdrop() }
         syncWallpaper()
+    }
+    // 每屏各自判断可见性：被全屏应用盖住、不在当前空间、系统挂起或手动暂停时，
+    // 场景冻结在当前画面；lastTime 归零保证恢复时不出现大步长跳帧。
+    func updateRenderActivity() {
+        for (window, scene) in zip(desktopWindows, desktopScenes) {
+            scene.lastTime = 0
+            scene.isPaused = systemPausedLikeUser(desktopWindowVisible(window), systemSuspended: systemSuspended, userPaused: preferences.paused)
+        }
+        if let scene = previewScene {
+            let visible = previewWindow.map { desktopWindowVisible($0) } ?? false
+            scene.lastTime = 0
+            scene.isPaused = systemPausedLikeUser(visible, systemSuspended: systemSuspended, userPaused: preferences.paused)
+        }
     }
     func syncWallpaper(onlyManaged: Bool = false) {
         if preferences.enabled && preferences.harmony {
@@ -655,21 +696,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             desktopWindows.append(window); desktopScenes.append(scene)
         }
         syncWallpaper()
+        updateRenderActivity()
     }
     func refreshDesktop() {
         syncWallpaper(onlyManaged: true)
-        for (window, scene) in zip(desktopWindows, desktopScenes) where window.isOnActiveSpace {
-            scene.lastTime = 0
-            scene.isPaused = systemSuspended || preferences.paused
+        updateRenderActivity()
+        for (window, _) in zip(desktopWindows, desktopScenes) where window.isOnActiveSpace {
             window.contentView?.needsDisplay = true
             window.displayIfNeeded()
         }
     }
     func suspend(_ value: Bool) {
         systemSuspended = value
-        for scene in desktopScenes + (previewScene.map { [$0] } ?? []) {
-            scene.lastTime = 0; scene.isPaused = value || preferences.paused
-        }
+        updateRenderActivity()
         if !value { applySettings() }  // 唤醒后立即对齐时段光色
     }
     func feedAll() {

@@ -67,7 +67,14 @@ func runDesktopPresentationChecks(preferences: Preferences) {
     precondition(canvas.backdrop === updated && canvas.layer?.contents != nil, "动态渲染器暂不可用时，窗口必须仍然保留池塘画面")
     precondition(WallpaperSync.isManaged(WallpaperSync.directory.appendingPathComponent("water-385E50.png")), "空间切换必须识别旧版绿色壁纸")
     precondition(!WallpaperSync.isManaged(URL(fileURLWithPath: "/tmp/user-wallpaper.png")), "空间切换不应更改其他空间的用户壁纸")
-    print(String(format: "通过：窗口内完整池塘底图、透明动态画布、外观更新、渲染器不可用时保留画面及旧壁纸识别；生成 %.1f ms，100 次缓存复用 %.1f ms。", initialDuration * 1000, cachedDuration * 1000))
+    // 遮挡门控：未上屏的测试窗口不算可见，可见性是暂停判定的一部分。
+    preferences.paused = false
+    precondition(!desktopWindowVisible(window), "未上屏的窗口必须视为不可见")
+    let hiddenPaused = systemPausedLikeUser(desktopWindowVisible(window), systemSuspended: false, userPaused: false)
+    precondition(hiddenPaused, "看不见的桌面场景必须暂停模拟")
+    precondition(!systemPausedLikeUser(true, systemSuspended: false, userPaused: false), "看得见的桌面场景必须正常播放")
+    precondition(systemPausedLikeUser(true, systemSuspended: true, userPaused: false) && systemPausedLikeUser(true, systemSuspended: false, userPaused: true), "系统挂起或手动暂停时必须无条件暂停")
+    print(String(format: "通过：窗口内完整池塘底图、透明动态画布、外观更新、渲染器不可用时保留画面、旧壁纸识别与可见性暂停门控；生成 %.1f ms，100 次缓存复用 %.1f ms。", initialDuration * 1000, cachedDuration * 1000))
 }
 
 func runDesignChecks(preferences: Preferences) {

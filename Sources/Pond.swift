@@ -3,7 +3,7 @@ import SpriteKit
 import SwiftUI
 import Combine
 
-let appVersion = "1.4.0"
+let appVersion = "1.5.0"
 let tau = Double.pi * 2
 func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -30,6 +30,7 @@ final class Preferences: ObservableObject {
     @Published var interact: Bool { didSet { save() } }
     @Published var feedModifier: String { didSet { save() } }
     @Published var daylightMode: String { didSet { save() } }
+    @Published var critters: Bool { didSet { save() } }
     @Published var designs: [FishDesign] { didSet { designData = nil; save() } }
     var onChange: (() -> Void)?
     let defaults: UserDefaults
@@ -51,6 +52,7 @@ final class Preferences: ObservableObject {
         feedModifier = d.string(forKey: "feedModifier") ?? "option"
         let savedDaylight = d.string(forKey: "daylightMode") ?? "auto"
         daylightMode = savedDaylight == "auto" || Daylight.all[savedDaylight] != nil ? savedDaylight : "auto"
+        critters = d.object(forKey: "pondCritters") == nil ? true : d.bool(forKey: "pondCritters")
         var loaded = (0..<60).map { FishDesign.initial($0) }
         if let data = d.data(forKey: "fishDesigns"), let saved = try? JSONDecoder().decode([FishDesign].self, from: data) {
             for fish in saved where fish.id >= 0 && fish.id < 60 { loaded[fish.id] = fish.validated }
@@ -66,6 +68,7 @@ final class Preferences: ObservableObject {
         d.set(harmony, forKey: "menuBarHarmony"); d.set(interact, forKey: "mouseInteraction")
         d.set(feedModifier, forKey: "feedModifier")
         d.set(daylightMode, forKey: "daylightMode")
+        d.set(critters, forKey: "pondCritters")
         if designData == nil { designData = try? JSONEncoder().encode(designs) }
         if let data = designData { d.set(data, forKey: "fishDesigns") }
         onChange?()
@@ -168,7 +171,8 @@ struct SeededRandom {
 final class PondScene: SKScene {
     let preferences: Preferences
     var swimmers: [Swimmer] = [], fishNodes: [FishNode] = []
-    let floor = SKNode(), inhabitants = SKNode(), surface = SKNode(), plants = SKNode(), foodLayer = SKNode()
+    let floor = SKNode(), critterLayer = SKNode(), inhabitants = SKNode(), surface = SKNode(), plants = SKNode(), foodLayer = SKNode()
+    let critters = PondCritters()
     let pondCamera = SKCameraNode()
     var worldSize: CGSize { CGSize(width: size.width * preferences.distance, height: size.height * preferences.distance) }
     var configuredSize = CGSize.zero
@@ -190,8 +194,8 @@ final class PondScene: SKScene {
         self.preferences = preferences
         super.init(size: size)
         scaleMode = .resizeFill
-        addChild(floor); addChild(inhabitants); addChild(surface); addChild(foodLayer); addChild(pondCamera); camera = pondCamera
-        floor.zPosition = -10; inhabitants.zPosition = 0; surface.zPosition = 10; foodLayer.zPosition = 12
+        addChild(floor); addChild(critterLayer); addChild(inhabitants); addChild(surface); addChild(foodLayer); addChild(pondCamera); camera = pondCamera
+        floor.zPosition = -10; critterLayer.zPosition = -5; inhabitants.zPosition = 0; surface.zPosition = 10; foodLayer.zPosition = 12
         configure()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -206,10 +210,12 @@ final class PondScene: SKScene {
         let rasterScale = (view?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) / preferences.distance
         if configuredSize != world {
             if configuredSize.width > 0 && configuredSize.height > 0 {
-                for i in swimmers.indices { swimmers[i].x *= world.width / configuredSize.width; swimmers[i].y *= world.height / configuredSize.height }
+                let xRatio = world.width / configuredSize.width, yRatio = world.height / configuredSize.height
+                for i in swimmers.indices { swimmers[i].x *= xRatio; swimmers[i].y *= yRatio }
                 for i in foodSpots.indices {
-                    foodSpots[i].position = CGPoint(x: foodSpots[i].position.x * world.width / configuredSize.width, y: foodSpots[i].position.y * world.height / configuredSize.height)
+                    foodSpots[i].position = CGPoint(x: foodSpots[i].position.x * xRatio, y: foodSpots[i].position.y * yRatio)
                 }
+                critters.rescale(xRatio: xRatio, yRatio: yRatio)
             }
             pondCamera.position = CGPoint(x: world.width / 2, y: world.height / 2); pondCamera.setScale(preferences.distance)
             configuredSize = world
@@ -249,6 +255,12 @@ final class PondScene: SKScene {
             fishNodes[i].setScale(swimmers[i].length / 115 * design.size)
             fishNodes[i].applyDaylight(daylight.tint, blend: daylight.fishBlend)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
+        }
+        if preferences.critters {
+            critters.populateIfNeeded(world: worldSize, layer: critterLayer)
+            critters.applyDaylight(daylight)
+        } else {
+            critters.remove()
         }
         view?.preferredFramesPerSecond = preferences.lowPower ? 20 : 30
         isPaused = preferences.paused; lastTime = 0
@@ -293,12 +305,13 @@ final class PondScene: SKScene {
         let local = window.convertFromScreen(NSRect(origin: p, size: .zero)).origin
         return worldPoint(fromView: local)
     }
-    // 急挥的光标惊散附近鱼群：一小段时间内全力逃离该点。
+    // 急挥的光标惊散附近鱼群：一小段时间内全力逃离该点；蝌蚪也四散弹开。
     func startle(near point: CGPoint) {
         let radius = min(worldSize.width, worldSize.height) * 0.28
         for i in swimmers.indices where hypot(swimmers[i].x - point.x, swimmers[i].y - point.y) < radius {
             swimmers[i].startledUntil = simulationTime + 1.4; swimmers[i].startledFrom = point
         }
+        critters.scatter(from: point, at: simulationTime, radius: radius)
     }
     func feed(at point: CGPoint? = nil) {
         // 多处投喂并存：新饲料不清除旧饲料，鱼群各自扑向最近一处；最多保留 5 处，再投替换最早的。
@@ -342,6 +355,11 @@ final class PondScene: SKScene {
         for i in swimmers.indices {
             swimmers[i].step(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height, speed: preferences.speed, targets: targets, positions: positions, index: i, cursor: cursorPoint, curious: curious, cursorRadius: cursorRadius)
             fishNodes[i].animate(time: simulationTime, swimmer: swimmers[i], speed: preferences.speed)
+        }
+        // 乌龟认食、蝌蚪窜游、田螺爬行；乌龟换气时在水面泛一圈涟漪。
+        critters.update(dt: dt, time: simulationTime, width: worldSize.width, height: worldSize.height,
+                        speed: preferences.speed, targets: targets, reducedMotion: water.reducedMotion) { point in
+            water.addRipple(at: point, time: simulationTime, strength: 0.3, radius: 95)
         }
         // 浅水中的鱼偶尔带动水面，保持稀疏尾波，避免每条鱼都画出一圈圈靶心。
         wakeClock += dt
@@ -408,6 +426,7 @@ struct SettingsView: View {
                     Slider(value: $preferences.speed, in: 0.3...1.8)
                 }
                 Button(action: edit) { Label("金鱼画室 · 颜色与花纹", systemImage: "paintbrush.pointed").frame(maxWidth: .infinity) }.buttonStyle(.bordered).controlSize(.large)
+                Toggle("小乌龟与小邻居 · 龟、蝌蚪、田螺", isOn: $preferences.critters).toggleStyle(.switch)
                 divider
                 sectionLabel("一汪池水")
                 HStack(spacing: 10) { themeButton("jade", "青池", 0x385E50); themeButton("ink", "墨池", 0x173D40); themeButton("blue", "晴池", 0x3B727C) }
@@ -580,7 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.target = self; button.action = #selector(togglePopover(_:)); button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         popover.behavior = .transient
-        popover.contentSize = CGSize(width: 340, height: 782)
+        popover.contentSize = CGSize(width: 340, height: 814)
         popover.contentViewController = NSHostingController(rootView: SettingsView(preferences: preferences, compact: true, feed: { [weak self] in self?.feedAll() }, preview: { [weak self] in self?.popover.close(); self?.showPreview() }, quit: { NSApp.terminate(nil) }, edit: { [weak self] in self?.popover.close(); self?.showEditor() }))
     }
     @objc func togglePopover(_ sender: Any?) {

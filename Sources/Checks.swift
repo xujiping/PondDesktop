@@ -127,6 +127,7 @@ func runDesignChecks(preferences: Preferences) {
     runWaterChecks(preferences: preferences)
     runDaylightChecks(preferences: preferences)
     runPlantMotionChecks(preferences: preferences)
+    runCritterChecks(preferences: preferences)
     runDesktopPresentationChecks(preferences: preferences)
     print("通过：单尾颜色/大小/笔画持久化、鱼身裁切、橡皮底色恢复、撤销重做、鱼群纹理更新、相机缩放和零尺寸窗口保护。")
 }
@@ -299,6 +300,91 @@ func runPlantMotionChecks(preferences: Preferences) {
     }
     precondition(scene.plantMotions.count == plantCount, "动画不能增加植物节点")
     print("通过：六类植物可见运动、两分钟漂移边界、水草根部固定、暂停、减少动态效果与纹理复用。")
+}
+
+func runCritterChecks(preferences: Preferences) {
+    // 乌龟：60 秒模拟的有限值、边界、平缓转向与周期换气。
+    var turtle = TurtleBrain(x: 500, y: 400, angle: 0.3, cruise: 11, phase: 2.1)
+    var breaths = 0
+    for frame in 0..<1800 {
+        if turtle.step(dt: 1.0 / 30, time: Double(frame) / 30, width: 2376, height: 1485, speed: 0.8, targets: []) { breaths += 1 }
+        precondition(turtle.x.isFinite && turtle.y.isFinite && turtle.angle.isFinite, "乌龟状态必须为有限数")
+        precondition(turtle.x >= 30 && turtle.x <= 2346 && turtle.y >= 30 && turtle.y <= 1455, "乌龟不能越过边界")
+        precondition(abs(turtle.turn) <= 0.56, "乌龟转向必须平缓")
+    }
+    precondition(breaths >= 2, "乌龟必须周期性上浮换气")
+    // 乌龟认食：30 秒内慢慢挪到饲料附近，不冲刺。
+    var fed = TurtleBrain(x: 500, y: 400, angle: 0, cruise: 12, phase: 0.5)
+    let food = CGPoint(x: 640, y: 400)
+    for frame in 0..<900 {
+        _ = fed.step(dt: 1.0 / 30, time: Double(frame) / 30, width: 1440, height: 900, speed: 1.0, targets: [food])
+    }
+    precondition(hypot(fed.x - food.x, fed.y - food.y) < 40, "乌龟必须慢慢游向饲料")
+    // 蝌蚪：30 秒模拟保持松散群落，不越界。
+    var rng = SeededRandom()
+    var school = (0..<8).map { _ in TadpoleBrain(x: rng.range(300, 700), y: rng.range(200, 500), angle: rng.range(0, tau), cruise: rng.range(26, 40), phase: rng.range(0, tau)) }
+    for frame in 0..<900 {
+        let time = Double(frame) / 30
+        var center = CGPoint.zero
+        for member in school { center.x += member.x; center.y += member.y }
+        center.x /= Double(school.count); center.y /= Double(school.count)
+        let positions = school.map { CGPoint(x: $0.x, y: $0.y) }
+        for i in school.indices {
+            var neighbors: [CGPoint] = []
+            for (j, p) in positions.enumerated() where j != i { neighbors.append(p) }
+            school[i].step(dt: 1.0 / 30, time: time, width: 1000, height: 700, speed: 1.0, center: center, neighbors: neighbors)
+            precondition(school[i].x.isFinite && school[i].x >= 16 && school[i].x <= 984 && school[i].y >= 16 && school[i].y <= 684, "蝌蚪不能越过边界")
+        }
+    }
+    let xs = school.map { $0.x }, ys = school.map { $0.y }
+    precondition((xs.max()! - xs.min()!) < 620 && (ys.max()! - ys.min()!) < 620, "蝌蚪必须保持松散群落，不能散满全池")
+    precondition(TurtlePainter.parts(1).first!.texture === TurtlePainter.parts(1).first!.texture, "乌龟必须复用纹理缓存")
+    precondition(TadpolePainter.part(0).texture === TadpolePainter.part(0).texture && SnailPainter.part(0).texture === SnailPainter.part(0).texture, "蝌蚪与田螺必须复用纹理缓存")
+    // 场景级：生成数量、独立图层、惊吓、暂停、开关、视野缩放与时段染色。
+    let scene = PondScene(size: CGSize(width: 900, height: 600), preferences: preferences)
+    scene.update(1); scene.update(2)
+    precondition(scene.critters.turtles.count == 2, "默认必须有两只小乌龟")
+    precondition(scene.critters.tadpoles.count >= 4 && scene.critters.tadpoles.count <= 10, "蝌蚪数量必须随池塘面积取整")
+    precondition(scene.critters.snails.count >= 1 && scene.critters.snails.count <= 3, "田螺数量必须在 1–3 只之间")
+    let critterCount = scene.critters.turtles.count + scene.critters.tadpoles.count + scene.critters.snails.count
+    precondition(scene.critterLayer.children.count == critterCount, "小动物必须挂在独立图层")
+    precondition(scene.critters.turtles.allSatisfy { $0.node.children.count == 5 } &&
+                 scene.critters.tadpoles.allSatisfy { $0.node.children.count == 1 } &&
+                 scene.critters.snails.allSatisfy { $0.node.children.count == 1 }, "每只小动物都必须挂上贴图子节点")
+    let victim = scene.critters.tadpoles[0]
+    let scare = CGPoint(x: victim.brain.x + 12, y: victim.brain.y)
+    scene.startle(near: scare)
+    precondition(scene.critters.tadpoles[0].brain.startledUntil > scene.simulationTime, "惊吓半径内的蝌蚪必须被惊到")
+    let fledFrom = CGPoint(x: scene.critters.tadpoles[0].brain.x, y: scene.critters.tadpoles[0].brain.y)
+    for frame in 0..<30 { scene.update(Double(frame) / 30 + 10) }
+    let fled = CGPoint(x: scene.critters.tadpoles[0].brain.x, y: scene.critters.tadpoles[0].brain.y)
+    precondition(hypot(fled.x - scare.x, fled.y - scare.y) > hypot(fledFrom.x - scare.x, fledFrom.y - scare.y), "受惊的蝌蚪必须远离惊吓点")
+    let untouched = scene.critters.tadpoles.map { $0.brain.startledUntil }
+    scene.startle(near: CGPoint(x: -9000, y: -9000))
+    precondition(scene.critters.tadpoles.map { $0.brain.startledUntil } == untouched, "远离池塘的惊吓不应影响蝌蚪")
+    let posed = scene.critters.turtles.map { CGPoint(x: $0.brain.x, y: $0.brain.y) }
+    let still = scene.critters.snails.map { CGPoint(x: $0.brain.x, y: $0.brain.y) }
+    preferences.paused = true; scene.update(50); scene.update(51)
+    precondition(scene.critters.turtles.map { CGPoint(x: $0.brain.x, y: $0.brain.y) } == posed &&
+                 scene.critters.snails.map { CGPoint(x: $0.brain.x, y: $0.brain.y) } == still, "暂停时小动物也必须停止")
+    preferences.paused = false
+    preferences.critters = false; scene.configure()
+    precondition(scene.critterLayer.children.isEmpty && scene.critters.isEmpty, "关闭小乌龟与小邻居必须清场")
+    preferences.critters = true; scene.configure()
+    precondition(!scene.critters.turtles.isEmpty && !scene.critters.tadpoles.isEmpty && !scene.critters.snails.isEmpty, "重新打开必须恢复小动物")
+    let oldWorld = scene.worldSize
+    let turtleBefore = scene.critters.turtles[0].brain
+    let tadpoleBefore = scene.critters.tadpoles[0].brain
+    scene.size = CGSize(width: 1800, height: 1200); scene.configure()
+    let ratio = scene.worldSize.width / oldWorld.width
+    precondition(abs(scene.critters.turtles[0].brain.x - turtleBefore.x * ratio) < 0.001 &&
+                 abs(scene.critters.tadpoles[0].brain.y - tadpoleBefore.y * ratio) < 0.001, "调整视野时小动物必须随池塘缩放")
+    precondition(scene.critters.turtles[0].brain.x <= scene.worldSize.width - 30, "缩放后的乌龟不能越过新边界")
+    preferences.daylightMode = "night"; scene.configure()
+    precondition(scene.critters.turtles[0].node.daylightBlend > 0.1, "夜晚的小动物必须带时段色")
+    preferences.daylightMode = "noon"; scene.configure()
+    precondition(scene.critters.turtles[0].node.daylightBlend == 0, "中午的小动物不能带时段色")
+    print("通过：乌龟换气与认食、蝌蚪群落与受惊四散、田螺爬行、暂停、开关清场、视野缩放、纹理复用与时段染色。")
 }
 
 func runVegetationChecks() {

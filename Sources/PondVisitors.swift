@@ -13,6 +13,7 @@ struct VisitorBrain {
     var stage: Stage
     var target: CGPoint
     var hoverUntil = 0.0
+    var exitBy = 0.0
     var wantSecondStop = false
 
     // 返回 true 表示这次到访结束，节点与影子应当移除。
@@ -47,7 +48,7 @@ struct VisitorBrain {
                     hoverUntil = time + rng.range(2.5, 6)
                 }
             }
-            if stage == .exiting && (x < -margin || x > width + margin || y < -margin || y > height + margin) { return true }
+            if stage == .exiting && (time >= exitBy || x < -margin || x > width + margin || y < -margin || y > height + margin) { return true }
         case .hovering:
             // 绕着花轻轻打转，飘远了就折回来。
             let dx = target.x - x, dy = target.y - y, d = hypot(dx, dy)
@@ -58,7 +59,12 @@ struct VisitorBrain {
             if time >= hoverUntil {
                 stage = .exiting
                 speed = 62
-                target = CGPoint(x: x + cos(angle) * (width + 240), y: y + sin(angle) * (height + 240))
+                // 离场目标必须沿当前朝向真正出海：按对角线取距离，保证目标点必在窗外。
+                // 若按宽高分别乘系数，对角朝向会把目标算进池内，蝴蝶抵达后在原地绕圈、
+                // 永远满足不了出界条件（表现为一直在角落转圈）。
+                let away = hypot(width, height) + 480
+                target = CGPoint(x: x + cos(angle) * away, y: y + sin(angle) * away)
+                exitBy = time + away / 25  // 保险丝：离场超时则强制结束到访
             }
         case .crossing:
             break
@@ -77,6 +83,11 @@ protocol VisitorFlying: SKNode {
     func applyDaylight(_ tint: UInt32, blend: CGFloat)
 }
 
+// 翅根与身体中轴都过贴图局部原点；两翅贴图上下镜像后 bounds 不同，锚点须按各自 bounds 换算。
+func rootAnchor(_ bounds: CGRect) -> CGPoint {
+    CGPoint(x: -bounds.minX / bounds.width, y: -bounds.minY / bounds.height)
+}
+
 enum VisitorPainter {
     static var cache: [Int: [FishArtPart]] = [:]
     static var shadowCache: [Int: SKTexture] = [:]
@@ -85,9 +96,12 @@ enum VisitorPainter {
         (0xEFEAD8, 0x3C3C34, 0xBAB49C, 0x3C3C34),  // 粉蝶 · 白
         (0x6E8FC4, 0x27364E, 0x4C6890, 0xB8CCE8)   // 闪蝶 · 蓝
     ]
+    // 翅膀按就位方向裁切:side = 1 在身体轴线上方,side = -1 上下镜像到下方。
     static let wingBounds = CGRect(x: -13, y: -2, width: 28, height: 29)
+    static let wingBoundsMirrored = CGRect(x: -13, y: -27, width: 28, height: 29)
     static let butterflyBodyBounds = CGRect(x: -13, y: -4, width: 30, height: 8)
     static let birdWingBounds = CGRect(x: -15, y: -1.5, width: 22, height: 30)
+    static let birdWingBoundsMirrored = CGRect(x: -15, y: -28.5, width: 22, height: 30)
     static let birdBodyBounds = CGRect(x: -17, y: -6.5, width: 36, height: 13)
     // 双翅与身体三块贴图，左右翅各画一份保证前后翅朝向对称。
     static func parts(_ kind: VisitorBrain.Kind, variant: Int) -> [FishArtPart] {
@@ -98,13 +112,13 @@ enum VisitorPainter {
         case .butterfly:
             specs = [
                 (wingBounds, { drawButterflyWing($0, side: 1, variant: variant % 3) }),
-                (wingBounds, { drawButterflyWing($0, side: -1, variant: variant % 3) }),
+                (wingBoundsMirrored, { drawButterflyWing($0, side: -1, variant: variant % 3) }),
                 (butterflyBodyBounds, { drawButterflyBody($0) })
             ]
         case .bird:
             specs = [
                 (birdWingBounds, { drawBirdWing($0, side: 1) }),
-                (birdWingBounds, { drawBirdWing($0, side: -1) }),
+                (birdWingBoundsMirrored, { drawBirdWing($0, side: -1) }),
                 (birdBodyBounds, { drawBirdBody($0) })
             ]
         }
@@ -126,32 +140,33 @@ enum VisitorPainter {
         return texture
     }
     // 翅膀：前翅大、后翅小的两瓣，纯色底、深色缘、放射脉纹与斑点。
+    // side 只镜像 y（翅膀展开方向），前翅始终朝头（+x），两翅分居身体两侧。
     static func drawButterflyWing(_ ctx: CGContext, side: Double, variant: Int) {
         let palette = butterflyPalettes[variant % butterflyPalettes.count]
         let hind = path { p in
-            p.move(to: CGPoint(x: side, y: 1))
-            p.addCurve(to: CGPoint(x: side * -6, y: 11), control1: CGPoint(x: side * -2, y: 5), control2: CGPoint(x: side * -5, y: 8.5))
-            p.addCurve(to: CGPoint(x: side, y: 15.5), control1: CGPoint(x: side * -6.5, y: 14), control2: CGPoint(x: side * -2, y: 16))
-            p.addCurve(to: CGPoint(x: side * 2, y: 2), control1: CGPoint(x: side * 3, y: 10), control2: CGPoint(x: side * 3.4, y: 5))
+            p.move(to: CGPoint(x: 1, y: side))
+            p.addCurve(to: CGPoint(x: -6, y: side * 11), control1: CGPoint(x: -2, y: side * 5), control2: CGPoint(x: -5, y: side * 8.5))
+            p.addCurve(to: CGPoint(x: 1, y: side * 15.5), control1: CGPoint(x: -6.5, y: side * 14), control2: CGPoint(x: -2, y: side * 16))
+            p.addCurve(to: CGPoint(x: 2, y: side * 2), control1: CGPoint(x: 3, y: side * 10), control2: CGPoint(x: 3.4, y: side * 5))
             p.closeSubpath()
         }
         fill(ctx, hind, palette.base, alpha: 0.95)
         line(ctx, hind, palette.edge, width: 0.6, alpha: 0.75)
         let fore = path { p in
-            p.move(to: CGPoint(x: side, y: 1))
-            p.addCurve(to: CGPoint(x: side * 10, y: 19), control1: CGPoint(x: side * 6, y: 9), control2: CGPoint(x: side * 9, y: 15))
-            p.addCurve(to: CGPoint(x: side * 13, y: 12), control1: CGPoint(x: side * 11, y: 18.5), control2: CGPoint(x: side * 12.5, y: 15))
-            p.addCurve(to: CGPoint(x: side * 1.5, y: 2.5), control1: CGPoint(x: side * 9, y: 8), control2: CGPoint(x: side * 4, y: 4))
+            p.move(to: CGPoint(x: 1, y: side))
+            p.addCurve(to: CGPoint(x: 10, y: side * 19), control1: CGPoint(x: 6, y: side * 9), control2: CGPoint(x: 9, y: side * 15))
+            p.addCurve(to: CGPoint(x: 13, y: side * 12), control1: CGPoint(x: 11, y: side * 18.5), control2: CGPoint(x: 12.5, y: side * 15))
+            p.addCurve(to: CGPoint(x: 1.5, y: side * 2.5), control1: CGPoint(x: 9, y: side * 8), control2: CGPoint(x: 4, y: side * 4))
             p.closeSubpath()
         }
         fill(ctx, fore, palette.base)
         ctx.saveGState(); ctx.addPath(fore); ctx.clip()
         // 白粉蝶的前翅端斑更重，其余花色只淡淡压一角。
         var tipRandom = SeededRandom(state: 31)
-        fill(ctx, PondEnvironment.organic(center: CGPoint(x: side * 9.5, y: 16), radius: variant == 1 ? 5 : 3.6, random: &tipRandom, count: 8), palette.edge, alpha: variant == 1 ? 0.85 : 0.4)
+        fill(ctx, PondEnvironment.organic(center: CGPoint(x: 9.5, y: side * 16), radius: variant == 1 ? 5 : 3.6, random: &tipRandom, count: 8), palette.edge, alpha: variant == 1 ? 0.85 : 0.4)
         var random = SeededRandom(state: UInt64(417 + variant * 97))
         for _ in 0..<7 {
-            let at = CGPoint(x: side * random.range(2, 10), y: random.range(4, 15))
+            let at = CGPoint(x: random.range(2, 10), y: side * random.range(4, 15))
             ctx.setFillColor(color(palette.spot, random.range(0.5, 0.9)).cgColor)
             let r = random.range(0.5, 1.1)
             ctx.fillEllipse(in: CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2))
@@ -160,8 +175,8 @@ enum VisitorPainter {
         line(ctx, fore, palette.edge, width: 0.7, alpha: 0.8)
         for i in 0..<4 {
             line(ctx, path { p in
-                p.move(to: CGPoint(x: side * 1.5, y: 2))
-                p.addQuadCurve(to: CGPoint(x: side * (3 + Double(i) * 3), y: 12 + Double(i) * 2.4), control: CGPoint(x: side * (2 + Double(i) * 2.6), y: 6 + Double(i) * 2))
+                p.move(to: CGPoint(x: 1.5, y: side * 2))
+                p.addQuadCurve(to: CGPoint(x: 3 + Double(i) * 3, y: side * (12 + Double(i) * 2.4)), control: CGPoint(x: 2 + Double(i) * 2.6, y: side * (6 + Double(i) * 2)))
             }, palette.vein, width: 0.5, alpha: 0.5)
         }
     }
@@ -183,27 +198,27 @@ enum VisitorPainter {
         ctx.fillEllipse(in: CGRect(x: 7.4, y: -1.7, width: 3.4, height: 3.4))
         line(ctx, body, 0x2E2820, width: 0.4, alpha: 0.7)
     }
-    // 燕子翼：细长后掠，后缘略浅，三根飞羽细线。
+    // 燕子翼：细长后掠，后缘略浅，三根飞羽细线。side 镜像 y，两翼分居身体两侧、同向后掠。
     static func drawBirdWing(_ ctx: CGContext, side: Double) {
         let wing = path { p in
-            p.move(to: CGPoint(x: side, y: 0))
-            p.addCurve(to: CGPoint(x: side * 3.5, y: 13), control1: CGPoint(x: side * 2.5, y: 5), control2: CGPoint(x: side * 3.5, y: 10))
-            p.addCurve(to: CGPoint(x: side * -4, y: 27), control1: CGPoint(x: side * 3, y: 20), control2: CGPoint(x: side * 0.5, y: 24))
-            p.addCurve(to: CGPoint(x: side * -12, y: 23), control1: CGPoint(x: side * -6, y: 28), control2: CGPoint(x: side * -9.5, y: 26.5))
-            p.addCurve(to: CGPoint(x: side * -4, y: 5.5), control1: CGPoint(x: side * -10, y: 16), control2: CGPoint(x: side * -8, y: 10))
-            p.addCurve(to: CGPoint(x: side, y: 0), control1: CGPoint(x: side * -3, y: 3), control2: CGPoint(x: side * -0.5, y: 1.5))
+            p.move(to: CGPoint(x: 1, y: 0))
+            p.addCurve(to: CGPoint(x: 3.5, y: side * 13), control1: CGPoint(x: 2.5, y: side * 5), control2: CGPoint(x: 3.5, y: side * 10))
+            p.addCurve(to: CGPoint(x: -4, y: side * 27), control1: CGPoint(x: 3, y: side * 20), control2: CGPoint(x: 0.5, y: side * 24))
+            p.addCurve(to: CGPoint(x: -12, y: side * 23), control1: CGPoint(x: -6, y: side * 28), control2: CGPoint(x: -9.5, y: side * 26.5))
+            p.addCurve(to: CGPoint(x: -4, y: side * 5.5), control1: CGPoint(x: -10, y: side * 16), control2: CGPoint(x: -8, y: side * 10))
+            p.addCurve(to: CGPoint(x: 1, y: 0), control1: CGPoint(x: -3, y: side * 3), control2: CGPoint(x: -0.5, y: side * 1.5))
             p.closeSubpath()
         }
         fill(ctx, wing, 0x4E5A64)
         ctx.saveGState(); ctx.addPath(wing); ctx.clip()
-        ctx.translateBy(x: side * 1.5, y: -1.5)
+        ctx.translateBy(x: 1.5, y: side * -1.5)
         fill(ctx, wing, 0x78878F, alpha: 0.4)
         ctx.restoreGState()
         line(ctx, wing, 0x272F36, width: 0.6, alpha: 0.8)
         for i in 0..<3 {
             line(ctx, path { p in
-                p.move(to: CGPoint(x: side, y: 6 + Double(i) * 5))
-                p.addQuadCurve(to: CGPoint(x: side * (-5 - Double(i) * 2), y: 19 + Double(i) * 2.5), control: CGPoint(x: side * (-1 - Double(i) * 1.5), y: 13 + Double(i) * 2.5))
+                p.move(to: CGPoint(x: 1, y: side * (6 + Double(i) * 5)))
+                p.addQuadCurve(to: CGPoint(x: -5 - Double(i) * 2, y: side * (19 + Double(i) * 2.5)), control: CGPoint(x: -1 - Double(i) * 1.5, y: side * (13 + Double(i) * 2.5)))
             }, 0x2E3840, width: 0.5, alpha: 0.5)
         }
     }
@@ -237,15 +252,15 @@ final class ButterflyNode: SKNode, VisitorFlying {
         phase = Double(variant) * 1.9 + 0.4
         super.init()
         let parts = VisitorPainter.parts(.butterfly, variant: variant % 3)
-        // 翅根落在原点（anchorPoint 对准纹理内缘），收拢时向身体轴线折合。
-        let root = CGPoint(x: 13.0 / 28.0, y: 2.0 / 29.0)
+        // 翅根锚在身体轴线上，收拢时两翅各自向轴线折合。
         for (node, part) in zip([leftWing, rightWing], [parts[0], parts[1]]) {
             let sprite = SKSpriteNode(texture: part.texture, size: part.bounds.size)
-            sprite.anchorPoint = root
+            sprite.anchorPoint = rootAnchor(part.bounds)
             node.addChild(sprite); addChild(node)
             tintables.append(sprite)
         }
         let body = SKSpriteNode(texture: parts[2].texture, size: parts[2].bounds.size)
+        body.anchorPoint = rootAnchor(parts[2].bounds)
         addChild(body)
         tintables.append(body)
     }
@@ -276,15 +291,14 @@ final class BirdNode: SKNode, VisitorFlying {
         phase = 1.1
         super.init()
         let parts = VisitorPainter.parts(.bird, variant: 0)
-        let root = CGPoint(x: 15.0 / 22.0, y: 1.5 / 30.0)
         for (node, part) in zip([leftWing, rightWing], [parts[0], parts[1]]) {
-
             let sprite = SKSpriteNode(texture: part.texture, size: part.bounds.size)
-            sprite.anchorPoint = root
+            sprite.anchorPoint = rootAnchor(part.bounds)
             node.addChild(sprite); addChild(node)
             tintables.append(sprite)
         }
         let body = SKSpriteNode(texture: parts[2].texture, size: parts[2].bounds.size)
+        body.anchorPoint = rootAnchor(parts[2].bounds)
         addChild(body)
         tintables.append(body)
     }

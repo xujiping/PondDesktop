@@ -46,6 +46,12 @@ func runVisitorChecks(preferences: Preferences) {
                          flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .butterfly)
     guard let butterfly = scene.visitors.visitor else { preconditionFailure("蝴蝶必须立刻生成") }
     precondition(butterfly.node.children.count == 3 && scene.visitorLayer.children.count == 2, "蝴蝶必须挂上双翅与身体贴图，并附带影子")
+    let wingParts = VisitorPainter.parts(.butterfly, variant: 0)
+    precondition(wingParts[1].bounds.minY == -wingParts[0].bounds.maxY && wingParts[1].bounds.maxY == -wingParts[0].bounds.minY,
+                 "左右翅贴图必须上下镜像、分居身体轴线两侧")
+    let birdWingParts = VisitorPainter.parts(.bird, variant: 0)
+    precondition(birdWingParts[1].bounds.minY == -birdWingParts[0].bounds.maxY && birdWingParts[1].bounds.maxY == -birdWingParts[0].bounds.minY,
+                 "燕子左右翼贴图必须上下镜像、分居身体轴线两侧")
     var hovered = false, departed = false
     for frame in 0..<2400 {
         scene.update(Double(frame) / 30 + 20)
@@ -59,6 +65,22 @@ func runVisitorChecks(preferences: Preferences) {
     precondition(hovered, "蝴蝶必须飞到花上悬停")
     precondition(departed, "蝴蝶到访结束后必须离场")
     precondition(scene.visitors.nextVisit > scene.simulationTime, "离场后必须排期下次到访")
+    // 回归：悬停结束后的离场目标必须真正出海，任意朝向都要在有限时间内出界，
+    // 不能在池内目标点原地绕圈（历史 bug：对角朝向时目标落在池内角落）。
+    for i in 0..<32 {
+        let angle = Double(i) * tau / 32
+        let start = CGPoint(x: scene.worldSize.width * 0.85, y: scene.worldSize.height * 0.85)
+        var brain = VisitorBrain(kind: .butterfly, x: start.x, y: start.y, angle: angle,
+                                 speed: 62, phase: 0.7, stage: .hovering, target: .zero)
+        var rng = SeededRandom(state: UInt64(51 + i))
+        var frames = 0
+        while !brain.step(dt: 1.0 / 30, time: 100 + Double(frames) / 30,
+                          width: scene.worldSize.width, height: scene.worldSize.height,
+                          flowers: scene.flowerSpots, rng: &rng) {
+            frames += 1
+            precondition(frames < 1800, "蝴蝶朝 \(Int(angle * 180 / .pi))° 离场必须在 60 秒内出界")
+        }
+    }
     // 燕子：掠过全池即走。
     scene.visitors.spawn(time: scene.simulationTime, width: scene.worldSize.width, height: scene.worldSize.height,
                          flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .bird)

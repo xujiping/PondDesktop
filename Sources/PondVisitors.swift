@@ -14,6 +14,7 @@ struct VisitorBrain {
     var target: CGPoint
     var hoverUntil = 0.0
     var exitBy = 0.0
+    var arriveBy = 0.0
     var wantSecondStop = false
 
     // 返回 true 表示这次到访结束，节点与影子应当移除。
@@ -37,14 +38,26 @@ struct VisitorBrain {
             let dx = target.x - x, dy = target.y - y, d = hypot(dx, dy)
             // 飞行路径带一点摆动，不像巡导弹道。
             turnToward(atan2(dy, dx) + sin(time * 2.3 + phase) * 0.25, rate: 3.0, dt: dt)
-            x += cos(angle) * speed * dt
-            y += sin(angle) * speed * dt
-            if stage == .toFlower && d < 14 {
-                if wantSecondStop, flowers.count > 1 {
-                    wantSecondStop = false
-                    target = flowers[Int(rng.range(0, Double(flowers.count - 1)))]
-                } else {
+            // 寻花末段减速：全速时转向半径 v/ω 达 17–25 像素，比 14 像素的落花判定圈还大，
+            // 二次停靠改去近旁二三十像素内的花时会绕着花稳定盘旋、永远进不了圈。
+            // 减速把半径缩进圈内，也贴近真实蝴蝶收翅落花的样子。
+            let approach = stage == .toFlower ? max(0.25, min(1, d / 56)) : 1
+            x += cos(angle) * speed * approach * dt
+            y += sin(angle) * speed * approach * dt
+            if stage == .toFlower {
+                if d < 14 {
+                    if wantSecondStop, flowers.count > 1 {
+                        wantSecondStop = false
+                        target = flowers[Int(rng.range(0, Double(flowers.count - 1)))]
+                        arriveBy = time + hypot(target.x - x, target.y - y) / 35 + 12
+                    } else {
+                        stage = .hovering
+                        hoverUntil = time + rng.range(2.5, 6)
+                    }
+                } else if time >= arriveBy {
+                    // 保险丝：迟迟落不到花上（几何死锁、绕远）就就地悬停，随后按常路离场。
                     stage = .hovering
+                    target = CGPoint(x: x, y: y)
                     hoverUntil = time + rng.range(2.5, 6)
                 }
             }
@@ -376,6 +389,8 @@ final class PondVisitors {
                                  speed: rng.range(52, 75), phase: rng.range(0, tau),
                                  stage: .toFlower, target: target)
             brain.wantSecondStop = flowers.count > 1 && rng.next() < 0.45
+            // 寻花保险丝按入场航程给足余量：巡航至少 52px/s，1/35 的倒数已含 30% 富余再加 12 秒兜绕。
+            brain.arriveBy = time + hypot(target.x - entry.x, target.y - entry.y) / 35 + 12
             node = ButterflyNode(variant: Int(rng.range(0, 2.99)))
         case .bird:
             let fromLeft = rng.next() < 0.5

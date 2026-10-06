@@ -81,6 +81,39 @@ func runVisitorChecks(preferences: Preferences) {
             precondition(frames < 1800, "蝴蝶朝 \(Int(angle * 180 / .pi))° 离场必须在 60 秒内出界")
         }
     }
+    // 回归：二次停靠改去近旁的花（距新花仅十几到三十像素、朝向任意）时，
+    // 蝴蝶必须真正落进判定圈——全速转向半径 17–25 像素大于 14 像素判定圈，
+    // 历史上会绕花稳定盘旋进不了圈（用户见到的“一直在角落转圈”）。
+    // 这里关掉保险丝（arriveBy 极大），单测减速收敛本身。
+    for gap in [16.0, 20.0, 25.0, 30.0] {
+        for i in 0..<16 {
+            let heading = Double(i) * tau / 16
+            let bearing = heading + Double(i % 4) * 0.9
+            var brain = VisitorBrain(kind: .butterfly, x: 0, y: 0, angle: heading,
+                                     speed: 52 + Double(i % 3) * 11.5, phase: Double(i) * 0.61,
+                                     stage: .toFlower, target: CGPoint(x: gap * cos(bearing), y: gap * sin(bearing)))
+            brain.arriveBy = 1e9
+            var rng = SeededRandom(state: UInt64(300 + i))
+            var frames = 0
+            while brain.stage != .hovering {
+                precondition(!brain.step(dt: 1.0 / 30, time: Double(frames) / 30, width: 900, height: 600, flowers: [], rng: &rng),
+                             "寻花阶段不应出界离场")
+                frames += 1
+                precondition(frames < 900, "距花 \(Int(gap))px、朝向 \(Int(heading * 180 / .pi))° 的二次停靠必须在 30 秒内落花，不能绕花死锁")
+            }
+        }
+    }
+    // 回归：寻花保险丝——即便减速失灵落不到花，超时也必须就地悬停并照常离场。
+    var fused = VisitorBrain(kind: .butterfly, x: 100, y: 100, angle: 0, speed: 60, phase: 0.5,
+                             stage: .toFlower, target: CGPoint(x: 880, y: 520))
+    var fuseRng = SeededRandom(state: 9)
+    var fusedHover = false, fuseFrames = 0
+    while !fused.step(dt: 1.0 / 30, time: 200 + Double(fuseFrames) / 30, width: 1000, height: 600, flowers: [], rng: &fuseRng) {
+        if fused.stage == .hovering { fusedHover = true }
+        fuseFrames += 1
+        precondition(fuseFrames < 3000, "寻花超时后必须就地悬停并离场，不能永久滞留")
+    }
+    precondition(fusedHover, "保险丝触发后必须经过悬停，再转入离场")
     // 燕子：掠过全池即走。
     scene.visitors.spawn(time: scene.simulationTime, width: scene.worldSize.width, height: scene.worldSize.height,
                          flowers: scene.flowerSpots, layer: scene.visitorLayer, kind: .bird)
